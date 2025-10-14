@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "547065634375",
+    "project_id": "stepsync-3cfeb",
+    "storage_bucket": "stepsync-3cfeb.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:547065634375:android:220706ed05eeb06d07db62",
+        "android_client_info": {
+          "package_name": "com.example.stepsync"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "547065634375-l61dlpdce6nqcm38037vvnsrbch7ab03.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.stepsync",
+            "certificate_hash": "f64d51525b7bd7e444516961884a83cdd049cd98"
+          }
+        },
+        {
+          "client_id": "547065634375-r5g86anm92fnnk7f4u1pj3b4a5jomnm2.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAlQ1A7ETzQdd0D35pZQgPBQWaTzSNpKxk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "547065634375-r5g86anm92fnnk7f4u1pj3b4a5jomnm2.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

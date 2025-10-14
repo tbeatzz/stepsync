@@ -1,0 +1,83 @@
+name: stepsync
+description: "StepSync - A rhythm-based fitness app that syncs your steps with music."
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 🎨 UI y estilo
+  cupertino_icons: ^1.0.8
+  google_fonts: ^6.2.1
+  auto_size_text: ^3.0.0
+  flutter_animate: ^4.5.0
+  page_transition: ^2.1.0
+  font_awesome_flutter: ^10.8.0
+
+  # 💾 Almacenamiento local
+  shared_preferences: ^2.3.3
+  path_provider: ^2.1.3
+
+  # 🔥 Firebase (versiones estables y compatibles entre sí)
+  firebase_core: ^4.2.0
+  firebase_auth: ^6.1.1
+  cloud_firestore: ^6.0.3
+  google_sign_in: ^6.2.1
+
+
+  # ⚙️ Navegación y estado
+  go_router: ^16.2.4
+  provider: ^6.1.5
+
+  # 🏃‍♂️ Sensores y ubicación
+  sensors_plus: ^7.0.0
+  geolocator: ^14.0.2
+  permission_handler: ^12.0.1
+
+  # 🎵 Audio loops musicales
+  just_audio: ^0.10.5
+
+  # 🌐 Enlaces y utilidades
+  url_launcher: ^6.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
+    - assets/fonts/
+
+  fonts:
+    - family: Poppins
+      fonts:
+        - asset: assets/fonts/Poppins-Regular.ttf
+        - asset: assets/fonts/Poppins-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Poppins-Bold.ttf
+          weight: 700
+
+    - family: Montserrat
+      fonts:
+        - asset: assets/fonts/Montserrat-Regular.ttf
+        - asset: assets/fonts/Montserrat-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Montserrat-Bold.ttf
+          weight: 700
+
+    - family: Nunito
+      fonts:
+        - asset: assets/fonts/Nunito-Regular.ttf
+        - asset: assets/fonts/Nunito-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Nunito-Bold.ttf
+          weight: 700
