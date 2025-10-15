@@ -22,6 +22,14 @@
           }
         },
         {
+          "client_id": "547065634375-rd1ta7shdbbd29iephjlfu2q0cn3450u.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.stepsync",
+            "certificate_hash": "b1900c248e20adedc901bd91fa1cb34e25793fdf"
+          }
+        },
+        {
           "client_id": "547065634375-r5g86anm92fnnk7f4u1pj3b4a5jomnm2.apps.googleusercontent.com",
           "client_type": 3
         }
