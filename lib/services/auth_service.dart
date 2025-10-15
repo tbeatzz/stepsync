@@ -35,10 +35,10 @@ class AuthService {
 
       return userCredential.user;
     } on FirebaseAuthException catch (e) {
-      print('🔥 Error de FirebaseAuth: ${e.message}');
+      print('Error de FirebaseAuth: ${e.message}');
       return null;
     } catch (e) {
-      print('❌ Error general en Google Sign-In: $e');
+      print('Error Google Sign-In: $e');
       return null;
     }
   }
@@ -49,7 +49,7 @@ class AuthService {
       await _googleSignIn.signOut();
       await _auth.signOut();
     } catch (e) {
-      print('⚠️ Error al cerrar sesión: $e');
+      print('Error al cerrar sesión: $e');
     }
   }
 
