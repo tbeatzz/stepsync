@@ -3,64 +3,73 @@ import 'dart:math';
 import 'package:sensors_plus/sensors_plus.dart';
 
 class StepService {
-  // Control del stream
-  StreamSubscription? _subscription;
+  final Function(int bpm) onBpmUpdated;
 
-  // Valor actual del BPM calculado
-  int currentBpm = 0;
+  int _stepCount = 0;
+  DateTime? _lastStepTime;
+  final List<int> _intervals = [];
+  final List<double> _recentMagnitudes = [];
+  final int _maxMagnitudes = 30;
+  final int _maxIntervals = 6;
+  final double _thresholdOffset = 0.7; // puede ajustar
+  final int _minStepIntervalMs = 300; // mínimo tiempo entre pasos validos (ms)
 
-  // Último timestamp en que se detectó un "paso"
-  double _lastStepTime = 0;
+  StepService({required this.onBpmUpdated});
 
-  // Callback que notifica al UI cuando hay nuevo BPM
-  final Function(int bpm)? onBpmUpdated;
-
-  StepService({this.onBpmUpdated});
-
-  /// Inicia la escucha del acelerómetro
   void startListening() {
-    const double threshold = 1.2; // Sensibilidad: cuanto más bajo, más sensible
-    final List<double> magnitudes = [];
-
-    _subscription = userAccelerometerEvents.listen((event) {
-      // Magnitud total del vector de aceleración
-      double magnitude =
+    accelerometerEvents.listen((AccelerometerEvent event) {
+      final double magnitude =
       sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
 
-      magnitudes.add(magnitude);
+      _recentMagnitudes.add(magnitude);
+      if (_recentMagnitudes.length > _maxMagnitudes) {
+        _recentMagnitudes.removeAt(0);
+      }
 
-      // Si hay suficientes datos, procesamos
-      if (magnitudes.length > 10) {
-        // Detectar picos (movimientos bruscos)
-        double avg = magnitudes.reduce((a, b) => a + b) / magnitudes.length;
-        double peak = magnitudes.last;
-
-        if (peak > avg + threshold) {
-          double now = DateTime.now().millisecondsSinceEpoch / 1000.0;
-
-          // Calculamos intervalo desde el último paso
-          if (_lastStepTime != 0) {
-            double diff = now - _lastStepTime;
-            double bpm = 60.0 / diff;
-
-            // Limitamos valores razonables
-            if (bpm > 60 && bpm < 200) {
-              currentBpm = bpm.round();
-              onBpmUpdated?.call(currentBpm);
-            }
-          }
-
-          _lastStepTime = now;
-        }
-
-        magnitudes.clear();
+      if (_isStepDetected()) {
+        _stepCount++;
+        _calculateBpm();
       }
     });
   }
 
-  /// Detiene la escucha del sensor
+  bool _isStepDetected() {
+    if (_recentMagnitudes.length < 5) return false;
+
+    // Media móvil de magnitudes
+    double sum = _recentMagnitudes.reduce((a, b) => a + b);
+    double avg = sum / _recentMagnitudes.length;
+    double latest = _recentMagnitudes.last;
+
+    // Comparar si está lo suficientemente por encima del promedio local
+    return latest > avg + _thresholdOffset;
+  }
+
+  void _calculateBpm() {
+    final now = DateTime.now();
+    if (_lastStepTime != null) {
+      final diff = now.difference(_lastStepTime!).inMilliseconds;
+
+      // Validar que el intervalo esté en rango aceptable
+      if (diff > _minStepIntervalMs && diff < 3000) {
+        _intervals.add(diff);
+        if (_intervals.length > _maxIntervals) {
+          _intervals.removeAt(0);
+        }
+
+        // Promediar intervalos
+        double sum = _intervals.fold<int>(0, (a, b) => a + b).toDouble();
+        double avg = sum / _intervals.length;
+
+        int bpm = (60000 / avg).round();
+        onBpmUpdated(bpm);
+
+      }
+    }
+    _lastStepTime = now;
+  }
+
   void stopListening() {
-    _subscription?.cancel();
-    _subscription = null;
+
   }
 }

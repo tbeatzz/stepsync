@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../services/step_service.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class SessionScreen extends StatefulWidget {
   final String mode; // “Caminar”, “Trotar” o “Correr”
@@ -14,6 +15,7 @@ class SessionScreen extends StatefulWidget {
 class _SessionScreenState extends State<SessionScreen> {
   StepService? _stepService;
   int currentBpm = 0;
+  int _steps = 0; // contador visible
 
   double distanceGoal = 2.0; // km
   int durationGoal = 0; // minutos (calculado automáticamente)
@@ -33,16 +35,78 @@ class _SessionScreenState extends State<SessionScreen> {
   @override
   void initState() {
     super.initState();
+    _initSession();
+  }
 
-    _calculateDuration(); // 🔹 calcula duración inicial
+  Future<void> _initSession() async {
+    await _requestPermissions();
+    _calculateDuration();
 
     _stepService = StepService(onBpmUpdated: (bpm) {
       setState(() {
         currentBpm = bpm;
+        _steps++;
       });
     });
 
     _stepService!.startListening();
+  }
+
+  /// verifica y solicita permisos solo si faltan
+  Future<void> _requestPermissions() async {
+    //  Pide permisos de actividad primero
+    final activityStatus = await Permission.activityRecognition.status;
+    if (!activityStatus.isGranted) {
+      final result = await Permission.activityRecognition.request();
+      if (result.isPermanentlyDenied) {
+        _showPermissionWarning("Reconocimiento de actividad");
+        return;
+      }
+    }
+
+    //  Luego permisos de ubicación
+    final locationStatus = await Permission.location.status;
+    if (!locationStatus.isGranted) {
+      final result = await Permission.location.request();
+      if (result.isPermanentlyDenied) {
+        _showPermissionWarning("Ubicación");
+        return;
+      }
+    }
+
+    //  Confirmación visual (solo la primera vez)
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Permisos concedidos correctamente."),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  /// Muestra alerta para ir a ajustes si se deniega permanentemente
+  void _showPermissionWarning(String permiso) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          " El permiso de $permiso fue denegado permanentemente.\nActiválo desde Ajustes > Aplicaciones > StepSync.",
+        ),
+        backgroundColor: Colors.redAccent,
+        action: SnackBarAction(
+          label: "Abrir ajustes",
+          textColor: Colors.white,
+          onPressed: openAppSettings,
+        ),
+      ),
+    );
+  }
+
+  Future<bool> _checkPermissions() async {
+    bool activityGranted = await Permission.activityRecognition.isGranted;
+    bool locationGranted = await Permission.location.isGranted;
+    return activityGranted && locationGranted;
   }
 
   void _calculateDuration() {
@@ -81,20 +145,11 @@ class _SessionScreenState extends State<SessionScreen> {
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             const SizedBox(height: 20),
-
-            // BPM actual
             _buildBpmCard(bpmRange),
-
             const SizedBox(height: 30),
-
-            // Configuración de sesión
             _buildSessionSettings(),
-
             const Spacer(),
-
-            // Botón de inicio
             _buildStartButton(context),
-
             const SizedBox(height: 20),
           ],
         ),
@@ -132,6 +187,14 @@ class _SessionScreenState extends State<SessionScreen> {
               fontSize: 14,
             ),
           ),
+          const SizedBox(height: 10),
+          Text(
+            "Pasos detectados: $_steps",
+            style: GoogleFonts.nunito(
+              color: Colors.white70,
+              fontSize: 14,
+            ),
+          ),
         ],
       ),
     );
@@ -156,8 +219,6 @@ class _SessionScreenState extends State<SessionScreen> {
             ),
           ),
           const SizedBox(height: 16),
-
-          // Distancia
           Row(
             children: [
               const Icon(Icons.route, color: Colors.white70),
@@ -188,10 +249,7 @@ class _SessionScreenState extends State<SessionScreen> {
               ),
             ],
           ),
-
           const SizedBox(height: 12),
-
-          // Duración automática
           Row(
             children: [
               const Icon(Icons.timer, color: Colors.white70),
@@ -211,11 +269,22 @@ class _SessionScreenState extends State<SessionScreen> {
 
   Widget _buildStartButton(BuildContext context) {
     return GestureDetector(
-      onTap: () {
+      onTap: () async {
+        bool hasPermissions = await _checkPermissions();
+        if (!hasPermissions) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(" Otorgá los permisos para comenzar la sesión"),
+              backgroundColor: Colors.orangeAccent,
+            ),
+          );
+          return;
+        }
+
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text("🚧 Iniciando sesión de prueba..."),
-            backgroundColor: Colors.deepPurpleAccent,
+            content: Text("🏃‍♂️ Iniciando sesión..."),
+            backgroundColor: Colors.greenAccent,
           ),
         );
       },
