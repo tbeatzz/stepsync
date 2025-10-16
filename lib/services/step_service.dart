@@ -9,10 +9,15 @@ class StepService {
   DateTime? _lastStepTime;
   final List<int> _intervals = [];
   final List<double> _recentMagnitudes = [];
+
   final int _maxMagnitudes = 30;
-  final int _maxIntervals = 6;
-  final double _thresholdOffset = 0.7; // puede ajustar
-  final int _minStepIntervalMs = 300; // mínimo tiempo entre pasos validos (ms)
+  final int _maxIntervals = 10;
+  final int _minStepIntervalMs = 300;
+  final int _maxStepIntervalMs = 3000;
+
+  double _thresholdOffset = 0.7;
+  int _stableSteps = 0;
+  int _currentBpm = 0;
 
   StepService({required this.onBpmUpdated});
 
@@ -36,40 +41,59 @@ class StepService {
   bool _isStepDetected() {
     if (_recentMagnitudes.length < 5) return false;
 
-    // Media móvil de magnitudes
-    double sum = _recentMagnitudes.reduce((a, b) => a + b);
-    double avg = sum / _recentMagnitudes.length;
-    double latest = _recentMagnitudes.last;
+    final avg = _recentMagnitudes.reduce((a, b) => a + b) / _recentMagnitudes.length;
+    final latest = _recentMagnitudes.last;
 
-    // Comparar si está lo suficientemente por encima del promedio local
-    return latest > avg + _thresholdOffset;
+    // Umbral dinámico según estabilidad reciente
+    final variance = _recentMagnitudes
+        .map((v) => pow(v - avg, 2))
+        .reduce((a, b) => a + b) / _recentMagnitudes.length;
+    final stabilityFactor = variance < 1.0 ? 0.6 : 0.8;
+    final dynamicThreshold = avg + _thresholdOffset * stabilityFactor;
+
+    return latest > dynamicThreshold;
   }
 
   void _calculateBpm() {
     final now = DateTime.now();
+
     if (_lastStepTime != null) {
       final diff = now.difference(_lastStepTime!).inMilliseconds;
 
-      // Validar que el intervalo esté en rango aceptable
-      if (diff > _minStepIntervalMs && diff < 3000) {
+      if (diff > _minStepIntervalMs && diff < _maxStepIntervalMs) {
         _intervals.add(diff);
-        if (_intervals.length > _maxIntervals) {
-          _intervals.removeAt(0);
+        if (_intervals.length > _maxIntervals) _intervals.removeAt(0);
+
+        // Solo actualiza si hay pasos consistentes
+        _stableSteps++;
+        if (_stableSteps < 2) return;
+
+        final avg = _intervals.fold<int>(0, (a, b) => a + b).toDouble() / _intervals.length;
+        int newBpm = (60000 / avg).round();
+
+        // 🔹 Filtro de salto abrupto (±25 %)
+        if (_currentBpm != 0) {
+          final diffBpm = (newBpm - _currentBpm).abs();
+          if (diffBpm > _currentBpm * 0.25) {
+            newBpm = _currentBpm +
+                ((newBpm > _currentBpm)
+                    ? (_currentBpm * 0.25).round()
+                    : -(_currentBpm * 0.25).round());
+          }
         }
 
-        // Promediar intervalos
-        double sum = _intervals.fold<int>(0, (a, b) => a + b).toDouble();
-        double avg = sum / _intervals.length;
+        // 🔹 Suavizado exponencial
+        _currentBpm = (_currentBpm * 0.7 + newBpm * 0.3).round();
 
-        int bpm = (60000 / avg).round();
-        onBpmUpdated(bpm);
-
+        onBpmUpdated(_currentBpm);
       }
     }
     _lastStepTime = now;
   }
 
   void stopListening() {
-
+    _recentMagnitudes.clear();
+    _intervals.clear();
+    _stableSteps = 0;
   }
 }

@@ -44,6 +44,7 @@ dependencies:
 
   # 🌐 Enlaces y utilidades
   url_launcher: ^6.3.1
+  scidart: ^0.0.2-dev.12
 
 dev_dependencies:
   flutter_test:
