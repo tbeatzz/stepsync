@@ -1,31 +1,55 @@
 import 'dart:async';
 import 'dart:math';
+
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:scidart/numdart.dart';
 import 'package:scidart/scidart.dart';
 
 class StepServiceFFT {
+  // callback que escucha la UI (SessionScreen / GameScreen)
   Function(int bpm, int steps) _onUpdate;
+
+  // debug stream para mostrar logs en pantalla
   final StreamController<String> debugStream = StreamController.broadcast();
 
+  // buffer crudo de magnitudes del acelerómetro
   final List<double> _magnitudes = [];
-  final int _windowSize = 256;
 
+  // ventana de análisis FFT (corta = responde más rápido)
+  final int _windowSize = 128;
+
+  // timestamps recientes de pasos detectados
+  // los usamos para estimar cadencia instantánea
+  final List<DateTime> _recentStepTimes = [];
+
+  // timers / subscripciones
   Timer? _fftTimer;
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
 
+  // estado interno
   int _currentBpm = 0;
   int _steps = 0;
   DateTime? _lastStepTime;
 
-  StepServiceFFT({required Function(int bpm, int steps) onUpdate})
-      : _onUpdate = onUpdate;
+  bool _listening = false;
+  bool _disposed = false;
 
-  /// Llamar cuando empieza la sesión física (antesala o juego)
+  StepServiceFFT({
+    required Function(int bpm, int steps) onUpdate,
+  }) : _onUpdate = onUpdate;
+
+  // nos permite redirigir el listener cuando cambiamos de pantalla
+  void updateListener(Function(int bpm, int steps) listener) {
+    _onUpdate = listener;
+  }
+
   void startListening() {
-    // Escuchamos el acelerómetro y vamos registrando magnitud de movimiento
+    if (_disposed || _listening) return;
+    _listening = true;
+
+    // escuchamos acelerómetro crudo
     _accelerometerSubscription = accelerometerEvents.listen((event) {
-      final double magnitude = sqrt(
+      final magnitude = sqrt(
         event.x * event.x +
             event.y * event.y +
             event.z * event.z,
@@ -36,116 +60,199 @@ class StepServiceFFT {
         _magnitudes.removeAt(0);
       }
 
-      // Detección de paso simple
+      // detección de paso
       if (_isStepDetected()) {
         final now = DateTime.now();
+
+        // anti-doble-detección muy rápida
         if (_lastStepTime == null ||
             now.difference(_lastStepTime!).inMilliseconds > 300) {
           _steps++;
           _lastStepTime = now;
 
-          // avisamos al listener actual
-          _onUpdate(_currentBpm, _steps);
+          // guardamos timestamp para cadencia instantánea
+          _recentStepTimes.add(now);
+          if (_recentStepTimes.length > 8) {
+            _recentStepTimes.removeAt(0); // nos quedamos con los últimos 8 pasos
+          }
 
-          // debug visual
+          // actualizamos BPM usando cadencia por pasos
+          _updateBpmFromRecentSteps();
+
+          // notificamos UI
+          _notifyUpdate();
           debugStream.add("👣 Paso detectado ($_steps)");
         }
       }
     });
 
-    // FFT periódica para estimar BPM
-    _fftTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _analyzeSignal();
+    // análisis FFT cada ~700ms
+    _fftTimer = Timer.periodic(const Duration(milliseconds: 700), (_) {
+      _analyzeSignalFft();
     });
   }
 
-  /// Cambiar dinámicamente quién recibe los updates.
-  /// Esto nos permite que SessionScreen "suelte" y GameScreen "agarre".
-  void updateListener(Function(int bpm, int steps) listener) {
-    _onUpdate = listener;
-  }
-
-  /// Heurística de detección de paso
+  // calcula si el último pico es paso
   bool _isStepDetected() {
     if (_magnitudes.length < 10) return false;
 
-    double avg = _magnitudes.reduce((a, b) => a + b) / _magnitudes.length;
-    double std = sqrt(
+    final avg = _magnitudes.reduce((a, b) => a + b) / _magnitudes.length;
+    final std = sqrt(
       _magnitudes
           .map((m) => pow(m - avg, 2))
           .reduce((a, b) => a + b) /
           _magnitudes.length,
     );
 
-    double latest = _magnitudes.last;
+    final latest = _magnitudes.last;
 
-    // sensibilidad adaptativa: cuando hay pocas muestras toleramos más ruido
-    double sensitivity = _magnitudes.length < 150 ? 0.5 : 0.8;
-
+    // sensibilidad dinámica como tenías
+    final sensitivity = _magnitudes.length < 150 ? 0.5 : 0.8;
     return latest > avg + std * sensitivity;
   }
 
-  /// FFT para estimar cadencia y convertirla a BPM
-  void _analyzeSignal() {
-    if (_magnitudes.length < _windowSize ~/ 2) return;
+  // NUEVO:
+  // estimamos bpm a partir de los últimos pasos detectados
+  // esto responde rápido cuando cambiás de ritmo
+  void _updateBpmFromRecentSteps() {
+    if (_recentStepTimes.length < 2) return;
 
-    double mean = _magnitudes.reduce((a, b) => a + b) / _magnitudes.length;
-    var centered = _magnitudes.map((m) => m - mean).toList();
-    var signal = Array(centered);
+    // calculamos los intervalos entre pasos consecutivos (en ms)
+    final List<int> intervalsMs = [];
+    for (int i = 1; i < _recentStepTimes.length; i++) {
+      final dt = _recentStepTimes[i]
+          .difference(_recentStepTimes[i - 1])
+          .inMilliseconds;
+      intervalsMs.add(dt);
+    }
 
-    // Frecuencia de muestreo aprox del acelerómetro (puede tunearse)
-    const double fs = 50.0;
-    double freq = _freqFromFft(signal, fs);
+    if (intervalsMs.isEmpty) return;
 
-    int bpm = (freq * 60).round();
-    if (bpm < 30 || bpm > 240) return; // filtro de valores locos
+    // promedio del período entre pasos
+    final avgIntervalMs =
+        intervalsMs.reduce((a, b) => a + b) / intervalsMs.length;
 
-    // suavizado para que no parpadee
-    _currentBpm = (_currentBpm * 0.7 + bpm * 0.3).round();
+    if (avgIntervalMs <= 0) return;
 
-    // notificamos al listener activo
-    _onUpdate(_currentBpm, _steps);
+    // cadencia instantánea = 60000ms / período promedio
+    final instantBpm = (60000.0 / avgIntervalMs).round();
 
-    // debug info
-    debugStream.add("📊 FFT detectó ${_currentBpm} BPM");
+    // descartamos valores locos
+    if (instantBpm < 30 || instantBpm > 240) return;
+
+    // mezcla: si estamos cambiando fuerte, reaccioná rápido
+    if (_currentBpm == 0) {
+      _currentBpm = instantBpm;
+    } else {
+      final diff = (instantBpm - _currentBpm).abs();
+      // si cambió MUCHO el ritmo, saltá rápido
+      const fastFactor = 0.8;
+      // si cambió poquito, no marees al usuario
+      const normalFactor = 0.4;
+
+      final factor = diff >= 10 ? fastFactor : normalFactor;
+      _currentBpm =
+          (_currentBpm * (1 - factor) + instantBpm * factor).round();
+    }
+
+    debugStream.add("⚡ Cadencia pasos => ${_currentBpm} BPM");
   }
 
-  /// Obtiene la frecuencia dominante del movimiento usando FFT + interpolación parabólica
-  double _freqFromFft(Array sig, double fs) {
-    var windowed = sig * blackmanharris(sig.length);
-    var f = rfft(windowed);
-    var fAbs = arrayComplexAbs(f);
+  // FFT: sirve de estabilizador / validación
+  // se ejecuta periódicamente en paralelo
+  void _analyzeSignalFft() {
+    // necesitamos al menos media ventana
+    if (_magnitudes.length < _windowSize ~/ 2) return;
 
+    // centramos la señal
+    final mean = _magnitudes.reduce((a, b) => a + b) / _magnitudes.length;
+    final centered = _magnitudes.map((m) => m - mean).toList();
+    final signal = Array(centered);
+
+    // 🔁 calculamos sample rate estimada en vez de asumir 50 Hz fijo
+    // estimación: medimos la duración real del buffer actual
+    // suposición: _magnitudes se llena en tiempo real 1:1 con eventos del acelerómetro
+    // - agarramos _recentStepTimes para tener una idea de tiempo real transcurrido
+    // fallback si no hay suficientes pasos: seguimos usando ~50 Hz
+    double fsEstimate = 50.0;
+    if (_recentStepTimes.length >= 2) {
+      final msWindow = _recentStepTimes.last
+          .difference(_recentStepTimes.first)
+          .inMilliseconds;
+      // si entre el primer y último paso pasaron X ms,
+      // y en ese mismo lapso juntamos N muestras en _magnitudes,
+      // podemos aproximar la frecuencia real.
+      if (msWindow > 0) {
+        final secondsWindow = msWindow / 1000.0;
+        final samplesWindow = min(_magnitudes.length, _windowSize).toDouble();
+        final est = samplesWindow / secondsWindow;
+        if (est > 20 && est < 100) {
+          fsEstimate = est;
+        }
+      }
+    }
+
+    final freq = _freqFromFft(signal, fsEstimate);
+
+    final fftBpm = (freq * 60).round();
+    if (fftBpm < 30 || fftBpm > 240) return;
+
+    // combinamos la estimación FFT con lo que ya tenemos
+    // pero FFT es más "lenta", así que la usamos como empujón suave
+    final diff = (fftBpm - _currentBpm).abs();
+    const slowFactor = 0.25;
+    const catchupFactor = 0.5;
+    final factor = diff >= 15 ? catchupFactor : slowFactor;
+
+    _currentBpm =
+        (_currentBpm * (1 - factor) + fftBpm * factor).round();
+
+    debugStream.add("📊 FFT refine => $_currentBpm BPM (fft:$fftBpm)");
+
+    _notifyUpdate();
+  }
+
+  double _freqFromFft(Array sig, double fs) {
+    final windowed = sig * blackmanharris(sig.length);
+    final f = rfft(windowed);
+    final fAbs = arrayComplexAbs(f);
     if (fAbs.isEmpty) return 0;
+
     var i = arrayArgMax(fAbs);
     if (i <= 0 || i >= fAbs.length - 1) return 0;
 
-    var result = parabolic(arrayLog(fAbs), i);
+    final result = parabolic(arrayLog(fAbs), i);
     if (result.isEmpty || result[0].isNaN) return 0;
 
-    var true_i = result[0];
+    final true_i = result[0];
     if (true_i.isNaN) return 0;
 
-    double freq = fs * true_i / windowed.length;
-
-    // descartamos frecuencias inhumanas para caminar/trotar
-    if (freq < 0.5 || freq > 4.0) return 0;
-
+    final freq = fs * true_i / windowed.length;
+    if (freq < 0.5 || freq > 4.0) return 0; // ~30-240 bpm
     return freq;
   }
 
-  /// Frenar la captura de datos.
-  /// Importante: NO cerramos debugStream acá, para que la otra pantalla
-  /// (o futuras pantallas) puedan seguir mostrándolo si reutilizamos el servicio.
-  void stopListening() {
-    _fftTimer?.cancel();
-    _accelerometerSubscription?.cancel();
-    _magnitudes.clear();
+  void _notifyUpdate() {
+    _onUpdate(_currentBpm, _steps);
   }
 
-  /// Si en algún momento querés destruir TODO el servicio (fin de sesión),
-  /// llamar a esto.
+  // detener sensores y timers (pero no cerrar stream todavía)
+  void stopListening() {
+    if (!_listening) return;
+    _listening = false;
+
+    _fftTimer?.cancel();
+    _accelerometerSubscription?.cancel();
+
+    _magnitudes.clear();
+    _recentStepTimes.clear();
+  }
+
+  // destruir el servicio completamente
   void disposeService() {
+    if (_disposed) return;
+    _disposed = true;
+
     stopListening();
     debugStream.close();
   }

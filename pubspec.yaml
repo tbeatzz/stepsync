@@ -40,7 +40,7 @@ dependencies:
   permission_handler: ^12.0.1
 
   # 🎵 Audio loops musicales
-  just_audio: ^0.10.5
+  just_audio: ^0.9.36  # o la versión estable más reciente
 
   # 🌐 Enlaces y utilidades
   url_launcher: ^6.3.1
@@ -57,6 +57,12 @@ flutter:
   assets:
     - assets/images/
     - assets/fonts/
+    - assets/audio/loop_70.wav
+    - assets/audio/loop_80.wav
+    - assets/audio/loop_90.wav
+    - assets/audio/loop_100.wav
+    - assets/audio/loop_110.wav
+
 
   fonts:
     - family: Poppins
