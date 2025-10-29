@@ -22,13 +22,24 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen> {
-  late int _currentBpm;
-  late int _steps;
+  // ----- estado crudo que viene del sensor -----
+  int _rawBpm = 0;
+  int _steps = 0;
 
-  // estado de ritmo y combo
+  // ----- estado filtrado / estable -----
+  // lo que mostramos, lo que usamos para audio y combo
+  int _stableBpm = 0;
+
+  // ventana de bpm recientes para filtrar ruido
+  final List<int> _bpmWindow = [];
+  static const int _bpmWinSize = 7; // ~últimos ticks (~1s aprox)
+
+  // combo / feedback
   bool _inRhythm = false;
-  int _syncTicks = 0; // sube mientras mantenés el ritmo, se resetea si lo perdés
+  int _syncTicks = 0;
+  int _maxCombo = 0;
 
+  // ciclo de vida / navegación
   bool _navigatingOut = false;
   bool _disposedOrExiting = false;
 
@@ -38,36 +49,98 @@ class _GameScreenState extends State<GameScreen> {
   void initState() {
     super.initState();
 
-    // Estado inicial heredado de la antesala
-    _currentBpm = widget.initialBpm;
+    _rawBpm = widget.initialBpm;
+    _stableBpm = widget.initialBpm;
     _steps = widget.initialSteps;
 
     _audioLoopService = AudioLoopService();
     _audioLoopService.init().then((_) {
-      // Apenas entramos al juego: disparar el loop correspondiente al BPM inicial
-      _audioLoopService.updateLoopForBpm(_currentBpm);
+      // arrancamos el loop con el bpm ya estabilizado
+      _audioLoopService.updateLoopForBpm(_stableBpm);
     });
 
-    // Calculamos inRhythm / combo inicial
-    _updateRhythmState();
+    // primer cálculo de estado de ritmo / combo
+    _recalcRhythmAndCombo();
 
-    // Redirigimos el listener del servicio de pasos a ESTA pantalla
-    widget.stepService.updateListener((bpm, steps) {
+    // redirigimos el listener del servicio de pasos
+    widget.stepService.updateListener((bpmCrudo, stepsNow) {
       if (!mounted || _disposedOrExiting) return;
 
       setState(() {
-        _currentBpm = bpm;
-        _steps = steps;
-        _updateRhythmState(); // también actualiza combo
+        _rawBpm = bpmCrudo;
+        _steps = stepsNow;
+
+        // 1. acumulamos ventana
+        _pushBpmSample(bpmCrudo);
+
+        // 2. recalculamos el bpm filtrado estable
+        _stableBpm = _computeStableBpm();
+
+        // 3. actualizamos combo/ritmo con ese bpm estable
+        _recalcRhythmAndCombo();
       });
 
-      // cada update de BPM también actualiza el loop musical
-      _audioLoopService.updateLoopForBpm(bpm);
+      // 4. también usamos el bpm estable para decidir loop musical
+      _audioLoopService.updateLoopForBpm(_stableBpm);
     });
   }
 
-  /// Chequea si el bpm actual cae dentro de alguno de los buckets de caminar.
-  /// Si sí, estás "en ritmo" para este modo.
+  // guarda un nuevo bpm en la ventana y controla tamaño
+  void _pushBpmSample(int val) {
+    // ignorar bpm totalmente ridículos que a veces mete ruido inicial
+    if (val < 30 || val > 240) return;
+
+    _bpmWindow.add(val);
+    if (_bpmWindow.length > _bpmWinSize) {
+      _bpmWindow.removeAt(0);
+    }
+  }
+
+  // calcula bpm estable
+  //
+  // pasos:
+  // 1. si hay pocos datos, devolvemos el último crudo.
+  // 2. tiramos outliers fuertes dentro de la ventana (saltos locos).
+  // 3. sacamos la mediana.
+  // 4. cuantizamos para que el número no parpadee: lo llevamos de a 2 bpm.
+  //
+  int _computeStableBpm() {
+    if (_bpmWindow.isEmpty) {
+      return _rawBpm;
+    }
+
+    // copia local
+    final samples = List<int>.from(_bpmWindow);
+
+    // limpiamos outliers groseros basados en la mediana preliminar
+    samples.sort();
+    final medianPre = samples[samples.length ~/ 2];
+
+    final cleaned = samples.where((b) {
+      final diff = (b - medianPre).abs();
+      // si un valor se va MUCHO (ej 20 bpm lejos) lo ignoramos
+      return diff <= 20;
+    }).toList();
+
+    if (cleaned.isEmpty) {
+      // si limpiamos demasiado agresivo, fallback a medianPre
+      return _quantizeBpm(medianPre);
+    }
+
+    cleaned.sort();
+    final median = cleaned[cleaned.length ~/ 2];
+
+    return _quantizeBpm(median);
+  }
+
+  // hace que el número no cambie 1-1-1 cada frame
+  // podés cambiar a /5 *5 si querés bloques de a 5 BPM
+  int _quantizeBpm(int bpm) {
+    final quantized = (bpm / 2).round() * 2;
+    return quantized;
+  }
+
+  // checkea si un bpm cae en algún bucket válido de caminar
   bool _isInWalkingRange(int bpm) {
     for (final bucket in walkingBuckets) {
       if (bucket.contains(bpm)) {
@@ -77,21 +150,20 @@ class _GameScreenState extends State<GameScreen> {
     return false;
   }
 
-  /// Actualiza:
-  /// - _inRhythm (estás dentro de un rango válido o no)
-  /// - _syncTicks (contador estilo combo)
-  void _updateRhythmState() {
-    final bool nowInRhythm = _isInWalkingRange(_currentBpm);
+  // actualiza _inRhythm, el combo y registra el combo máximo
+  void _recalcRhythmAndCombo() {
+    final inside = _isInWalkingRange(_stableBpm);
 
-    if (nowInRhythm) {
-      // seguimos dentro del rango -> sumamos combo
+    if (inside) {
       _syncTicks++;
+      if (_syncTicks > _maxCombo) {
+        _maxCombo = _syncTicks;
+      }
     } else {
-      // nos fuimos de rango -> reseteamos combo
       _syncTicks = 0;
     }
 
-    _inRhythm = nowInRhythm;
+    _inRhythm = inside;
   }
 
   Future<void> _finishSessionAndExit() async {
@@ -99,14 +171,16 @@ class _GameScreenState extends State<GameScreen> {
     _navigatingOut = true;
     _disposedOrExiting = true;
 
-    // cortamos sensores
+    // apagamos sensores
     widget.stepService.disposeService();
 
-    // cortamos audio
+    // apagamos audio
     await _audioLoopService.stop();
     await _audioLoopService.dispose();
 
-    // Volvemos al home
+    // en el futuro acá podríamos guardar:
+    // _steps, _maxCombo, duración, bpm medio, etc.
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       context.go('/home');
@@ -117,7 +191,6 @@ class _GameScreenState extends State<GameScreen> {
   void dispose() {
     _disposedOrExiting = true;
 
-    // si el usuario se fue sin pasar por "Finalizar sesión", igual limpiamos
     if (!_navigatingOut) {
       widget.stepService.disposeService();
       _audioLoopService.stop();
@@ -130,7 +203,6 @@ class _GameScreenState extends State<GameScreen> {
   @override
   Widget build(BuildContext context) {
     return WillPopScope(
-      // Interceptamos el back físico/flecha
       onWillPop: () async {
         await _finishSessionAndExit();
         return false;
@@ -197,14 +269,17 @@ class _GameScreenState extends State<GameScreen> {
             ),
           ),
           const SizedBox(height: 12),
+
+          // mostramos el BPM estable, no el crudo
           Text(
-            '$_currentBpm BPM',
+            '$_stableBpm BPM',
             style: GoogleFonts.poppins(
               color: Colors.white,
               fontSize: 44,
               fontWeight: FontWeight.w700,
             ),
           ),
+
           const SizedBox(height: 12),
           Text(
             'Pasos: $_steps',
@@ -247,8 +322,7 @@ class _GameScreenState extends State<GameScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // título dinámico: ya no es fijo "Combo activo!",
-          // ahora mostramos el multiplicador real.
+          // combo en vivo usando ritmo estable
           Text(
             good ? '¡Combo x$_syncTicks!' : 'Fuera de ritmo',
             style: GoogleFonts.poppins(
@@ -260,8 +334,8 @@ class _GameScreenState extends State<GameScreen> {
           const SizedBox(height: 8),
           Text(
             good
-                ? 'Mantené la cadencia para subir el combo.'
-                : 'Volvé al rango objetivo para reactivar la música.',
+                ? 'Mantené la cadencia para subir el combo.\nMáx: x$_maxCombo'
+                : 'Volvé al rango objetivo para reactivar el combo.',
             style: GoogleFonts.nunito(
               color: Colors.white,
               fontSize: 16,

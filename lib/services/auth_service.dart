@@ -8,37 +8,42 @@ class AuthService {
   /// 🔹 Inicia sesión con Google
   Future<User?> signInWithGoogle() async {
     try {
-      // Desconecta cualquier sesión previa (evita errores en Android)
-      await _googleSignIn.signOut();
+      print('[AUTH] inicio signInWithGoogle');
 
-      // Inicia el flujo de autenticación
+      // 1. Elegir cuenta
       final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
+      print('[AUTH] _googleSignIn.signIn() -> $googleUser');
 
       if (googleUser == null) {
-        // El usuario canceló el login
+        print('[AUTH] El usuario canceló el login de Google');
         return null;
       }
 
-      // Obtiene los detalles de autenticación
+      // 2. Tokens de Google
       final GoogleSignInAuthentication googleAuth =
       await googleUser.authentication;
+      print('[AUTH] googleUser.authentication OK '
+          'accessToken=${googleAuth.accessToken != null} '
+          'idToken=${googleAuth.idToken != null}');
 
-      // Crea las credenciales para Firebase
+      // 3. Credencial de Firebase
       final AuthCredential credential = GoogleAuthProvider.credential(
         accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
       );
+      print('[AUTH] credential creada (${credential.runtimeType})');
 
-      // Inicia sesión en Firebase con las credenciales de Google
+      // 4. Loguear en Firebase
       final UserCredential userCredential =
       await _auth.signInWithCredential(credential);
+      print('[AUTH] signInWithCredential OK user=${userCredential.user}');
 
       return userCredential.user;
     } on FirebaseAuthException catch (e) {
-      print('Error de FirebaseAuth: ${e.message}');
+      print('[AUTH][FirebaseAuthException] code=${e.code} message=${e.message}');
       return null;
     } catch (e) {
-      print('Error Google Sign-In: $e');
+      print('[AUTH][Exception] $e');
       return null;
     }
   }

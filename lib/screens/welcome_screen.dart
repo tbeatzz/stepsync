@@ -55,18 +55,35 @@ class WelcomeScreen extends StatelessWidget {
 
               // 🔴 Botón Google Sign-In
               ElevatedButton.icon(
-                onPressed: () async {
-                  final user = await AuthService().signInWithGoogle();
-                  if (user != null) {
-                    context.go('/home');
-                  } else {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text("Error al iniciar sesión con Google"),
-                      ),
-                    );
-                  }
+                onPressed: () {
+                  context.go('/home'); // bypass login solo para test
                 },
+
+                // onPressed: () async {
+                //   print('[LOGIN] Tap Google');
+                //   final authService = AuthService();
+                //   final user = await authService.signInWithGoogle();
+                //   print('[LOGIN] signInWithGoogle() -> $user');
+                //   print('[LOGIN] FirebaseAuth.currentUser -> ${authService.currentUser}');
+                //
+                //   if (!context.mounted) {
+                //     print('[LOGIN] context no mounted, no puedo navegar');
+                //     return;
+                //   }
+                //
+                //   if (user != null) {
+                //     print('[LOGIN] Navegando a /home ...');
+                //     context.go('/home');
+                //   } else {
+                //     print('[LOGIN] user == null, mostrando snackbar');
+                //     ScaffoldMessenger.of(context).showSnackBar(
+                //       const SnackBar(
+                //         content: Text("Error al iniciar sesión con Google"),
+                //       ),
+                //     );
+                //   }
+                // },
+
                 icon: Image.asset(
                   'assets/images/google_icon.png',
                   height: 22,
