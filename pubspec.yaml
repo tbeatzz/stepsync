@@ -11,7 +11,7 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # 🎨 UI y estilo
+  #  UI y estilo
   cupertino_icons: ^1.0.8
   google_fonts: ^6.2.1
   auto_size_text: ^3.0.0
@@ -19,18 +19,18 @@ dependencies:
   page_transition: ^2.1.0
   font_awesome_flutter: ^10.8.0
 
-  # 💾 Almacenamiento local
+  #  Almacenamiento local
   shared_preferences: ^2.3.3
   path_provider: ^2.1.3
 
-  # 🔥 Firebase (versiones estables y compatibles entre sí)
+  #  Firebase (versiones estables y compatibles entre sí)
   firebase_core: ^4.2.0
   firebase_auth: ^6.1.1
   cloud_firestore: ^6.0.3
   google_sign_in: ^6.2.1
 
 
-  # ⚙️ Navegación y estado
+  # Navegación y estado
   go_router: ^16.2.4
   provider: ^6.1.5
 

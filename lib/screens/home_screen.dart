@@ -1,10 +1,14 @@
+// lib/screens/home_screen.dart
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:go_router/go_router.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 import '../utils/theme.dart';
 import '../widgets/custom_button.dart';
 import '../services/auth_service.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:go_router/go_router.dart';
+import '../data/user_repository.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -21,42 +25,8 @@ class HomeScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // HEADER
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    "stepsync",
-                    style: GoogleFonts.poppins(
-                      color: Colors.white,
-                      fontSize: 32,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  Row(
-                    children: [
-                      Text(
-                        user?.displayName ?? "Usuario",
-                        style: GoogleFonts.poppins(
-                          color: Colors.white70,
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      CircleAvatar(
-                        radius: 18,
-                        backgroundImage: user?.photoURL != null
-                            ? NetworkImage(user!.photoURL!)
-                            : null,
-                        backgroundColor: Colors.white24,
-                        child: user?.photoURL == null
-                            ? const Icon(Icons.person, color: Colors.white)
-                            : null,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+              // HEADER (evita overflow: nombre+foto arriba; nivel+pts abajo)
+              _Header(user: user),
 
               const SizedBox(height: 32),
 
@@ -100,12 +70,24 @@ class HomeScreen extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
-              _buildModeButton(context, "Caminar", Icons.directions_walk,
-                  [AppColors.walkStart, AppColors.walkEnd]),
-              _buildModeButton(context, "Trotar", Icons.directions_run,
-                  [AppColors.jogStart, AppColors.jogEnd]),
-              _buildModeButton(context, "Correr", Icons.directions_run,
-                  [AppColors.run, AppColors.run]),
+              _buildModeButton(
+                context,
+                "Caminar",
+                Icons.directions_walk,
+                [AppColors.walkStart, AppColors.walkEnd],
+              ),
+              _buildModeButton(
+                context,
+                "Trotar",
+                Icons.directions_run,
+                [AppColors.jogStart, AppColors.jogEnd],
+              ),
+              _buildModeButton(
+                context,
+                "Correr",
+                Icons.directions_run,
+                [AppColors.run, AppColors.run],
+              ),
             ],
           ),
         ],
@@ -115,6 +97,7 @@ class HomeScreen extends StatelessWidget {
 
   // 🔹 Sección de botones del menú principal
   Widget _buildMainMenu(BuildContext context) {
+
     void showWipMessage(String section) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -123,6 +106,8 @@ class HomeScreen extends StatelessWidget {
           duration: const Duration(seconds: 2),
         ),
       );
+
+
     }
 
     return Container(
@@ -183,11 +168,13 @@ class HomeScreen extends StatelessWidget {
 
   // 🔹 Botón rectangular para modos de juego
   Widget _buildModeButton(
-      BuildContext context, String label, IconData icon, List<Color> colors) {
+      BuildContext context,
+      String label,
+      IconData icon,
+      List<Color> colors,
+      ) {
     return GestureDetector(
-      onTap: () {
-        context.push('/session', extra: label); // ✅ ahora navega con el modo
-      },
+      onTap: () => context.push('/session', extra: label),
       child: Container(
         width: 90,
         height: 130,
@@ -213,6 +200,8 @@ class HomeScreen extends StatelessWidget {
             const SizedBox(height: 12),
             Text(
               label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: GoogleFonts.poppins(
                 color: Colors.white,
                 fontSize: 15,
@@ -222,6 +211,150 @@ class HomeScreen extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// =======================
+/// Header compacto y reactivo
+/// =======================
+class _Header extends StatelessWidget {
+  final User? user;
+  const _Header({required this.user});
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = user?.uid;
+
+    // Placeholder si todavía no hay user
+    if (uid == null) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            "stepsync",
+            style: GoogleFonts.poppins(
+              color: Colors.white,
+              fontSize: 32,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const CircleAvatar(
+            radius: 18,
+            backgroundColor: Colors.white24,
+            child: Icon(Icons.person, color: Colors.white),
+          ),
+        ],
+      );
+    }
+
+    return StreamBuilder<Map<String, dynamic>?>(
+      stream: UserRepository().watchUserProfile(uid),
+      builder: (context, snap) {
+        final data = snap.data ?? {};
+        final displayName = user?.displayName ?? 'Usuario';
+        final photoURL = user?.photoURL;
+        final level = (data['level'] ?? 1).toString();
+        final points = (data['points'] ?? 0).toString();
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 1) Fila: título + avatar + nombre (protegido con elipsis)
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(
+                  child: Text(
+                    "stepsync",
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.poppins(
+                      color: Colors.white,
+                      fontSize: 32,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                CircleAvatar(
+                  radius: 18,
+                  backgroundImage: (photoURL != null && photoURL.isNotEmpty)
+                      ? NetworkImage(photoURL)
+                      : null,
+                  backgroundColor: Colors.white24,
+                  child: (photoURL == null || photoURL.isEmpty)
+                      ? const Icon(Icons.person, color: Colors.white)
+                      : null,
+                ),
+                const SizedBox(width: 8),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 150),
+                  child: Text(
+                    displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.poppins(
+                      color: Colors.white70,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 8),
+
+            // 2) Debajo: nivel y puntos (en Wrap para evitar overflow)
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.06),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white10),
+              ),
+              child: Wrap(
+                spacing: 16,
+                runSpacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.stacked_bar_chart,
+                          size: 18, color: Colors.white70),
+                      const SizedBox(width: 6),
+                      Text(
+                        "Nivel $level",
+                        style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.star, size: 18, color: Colors.amber),
+                      const SizedBox(width: 6),
+                      Text(
+                        "$points pts",
+                        style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

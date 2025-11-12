@@ -1,44 +1,43 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:stepsync/data/user_repository.dart'; // ajustá el import
 
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
+  final UserRepository _userRepo = UserRepository();
 
-  /// 🔹 Inicia sesión con Google
   Future<User?> signInWithGoogle() async {
     try {
       print('[AUTH] inicio signInWithGoogle');
 
-      // 1. Elegir cuenta
       final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
       print('[AUTH] _googleSignIn.signIn() -> $googleUser');
+      if (googleUser == null) return null;
 
-      if (googleUser == null) {
-        print('[AUTH] El usuario canceló el login de Google');
-        return null;
-      }
-
-      // 2. Tokens de Google
-      final GoogleSignInAuthentication googleAuth =
-      await googleUser.authentication;
+      final googleAuth = await googleUser.authentication;
       print('[AUTH] googleUser.authentication OK '
           'accessToken=${googleAuth.accessToken != null} '
           'idToken=${googleAuth.idToken != null}');
 
-      // 3. Credencial de Firebase
-      final AuthCredential credential = GoogleAuthProvider.credential(
+      final credential = GoogleAuthProvider.credential(
         accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
       );
       print('[AUTH] credential creada (${credential.runtimeType})');
 
-      // 4. Loguear en Firebase
-      final UserCredential userCredential =
-      await _auth.signInWithCredential(credential);
-      print('[AUTH] signInWithCredential OK user=${userCredential.user}');
+      final userCred = await _auth.signInWithCredential(credential);
+      final user = userCred.user;
+      print('[AUTH] signInWithCredential OK user=$user');
 
-      return userCredential.user;
+      if (user != null) {
+        // 🔹el upsert del perfil
+        await _userRepo.upsertUserProfile(user);
+        print('[AUTH] upsertUserProfile OK (${user.uid})');
+      }
+
+      return user;
     } on FirebaseAuthException catch (e) {
       print('[AUTH][FirebaseAuthException] code=${e.code} message=${e.message}');
       return null;
@@ -48,7 +47,6 @@ class AuthService {
     }
   }
 
-  /// 🔹 Cierra la sesión
   Future<void> signOut() async {
     try {
       await _googleSignIn.signOut();
@@ -58,6 +56,5 @@ class AuthService {
     }
   }
 
-  /// 🔹 Obtiene el usuario actual (si hay sesión iniciada)
   User? get currentUser => _auth.currentUser;
 }

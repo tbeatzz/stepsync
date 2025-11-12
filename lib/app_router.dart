@@ -8,6 +8,7 @@ import 'screens/home_screen.dart';
 import 'screens/session_screen.dart';
 import 'screens/game_screen.dart';
 
+
 // Servicios
 import 'services/step_service_fft.dart';
 
@@ -50,5 +51,8 @@ final GoRouter appRouter = GoRouter(
         );
       },
     ),
+
+
+
   ],
 );
