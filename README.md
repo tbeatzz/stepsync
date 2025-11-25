@@ -122,10 +122,12 @@ flutter run
 ## 🚧 Roadmap
 - [x] Login con Google  
 - [x] Detección de pasos simulada  
-- [ ] Lectura real del acelerómetro  
-- [ ] Sincronización de música con BPM  
+- [x] Lectura real del acelerómetro  
+- [x] Sincronización de música con BPM
+- [ ] Perfil de jugador
 - [ ] Logros y progreso en la nube  
 - [ ] Modo desafío multijugador
+- [ ] Modo libre 
 
 ---
 
