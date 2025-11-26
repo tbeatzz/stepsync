@@ -75,8 +75,6 @@ class UserRepository {
   }
 
   /// Actualiza parcialmente el perfil actual.
-  /// La idea es que este método lo usemos más adelante
-  /// para aplicar lógicas de puntos/nivel.
   Future<void> updateCurrentUserProfile(UserProfile profile) async {
     final uid = currentUid;
     if (uid == null) return;
@@ -108,11 +106,14 @@ class UserRepository {
 
   /// Aplica recompensas al usuario actual en base a una sesión.
   /// Devuelve la cantidad de puntos ganados en esa sesión.
+  ///
+  /// Ahora tiene en cuenta también la distancia recorrida.
   Future<int> applySessionRewards({
     required String mode,      // "Caminar", "Trotar", "Correr"
     required int steps,
     required int maxCombo,
     required int avgBpm,
+    double distanceMeters = 0, // 👈 NUEVO (lo pasamos desde SessionRepository)
   }) async {
     final uid = currentUid;
     if (uid == null) {
@@ -135,13 +136,27 @@ class UserRepository {
       }
 
       final data = snap.data() as Map<String, dynamic>;
+
       final currentPoints = (data['points'] as int?) ?? 0;
       final currentLevel = (data['level'] as int?) ?? 1;
 
+      // Distancia total acumulada hasta ahora
+      double totalDistanceMeters = 0;
+      final rawDist = data['totalDistanceMeters'];
+      if (rawDist is int) {
+        totalDistanceMeters = rawDist.toDouble();
+      } else if (rawDist is double) {
+        totalDistanceMeters = rawDist;
+      }
+
+      // Loops desbloqueados actuales (si no hay, por defecto solo loop base)
+      List<String> unlockedLoops = ['loop_70'];
+      final rawLoops = data['unlockedLoops'];
+      if (rawLoops is List) {
+        unlockedLoops = rawLoops.map((e) => e.toString()).toSet().toList();
+      }
+
       // ---- Fórmula de puntos ----
-      // Puedes tunear esto a gusto, pero recuerdá:
-      // - Firestore rules limitan a +500 points por update
-      // - level solo puede subir de a 1
       double modeMultiplier;
       switch (mode) {
         case 'Correr':
@@ -160,7 +175,11 @@ class UserRepository {
       final comboBonus = maxCombo * 1.5;         // combo aporta bastante
       final intensityBonus = (avgBpm - 80) / 10; // premio leve por intensidad
 
-      double raw = (baseFromSteps + comboBonus + intensityBonus) * modeMultiplier;
+      // 👉 NUEVO: bonus por distancia (1 punto cada ~250 m)
+      final distanceBonus = (distanceMeters / 250.0);
+
+      double raw = (baseFromSteps + comboBonus + intensityBonus + distanceBonus) *
+          modeMultiplier;
 
       int reward = raw.round();
       if (reward < 0) reward = 0;
@@ -169,9 +188,7 @@ class UserRepository {
       final newPoints = currentPoints + reward;
 
       // ---- Lógica de nivel ----
-      // Nivel base: 1
-      // Subimos nivel cada 1000 puntos → con máximo +500 por sesión, nunca se salta más de 1 nivel
-      const int levelStep = 1000;
+      const int levelStep = 1000; // cada 1000 puntos → +1 nivel
       int computedLevel = 1 + (newPoints ~/ levelStep);
 
       // Defensa extra para respetar regla: level solo puede aumentar de a 1
@@ -182,9 +199,15 @@ class UserRepository {
         computedLevel = currentLevel;
       }
 
+      // ---- Distancia acumulada + loops desbloqueados ----
+      final newTotalDistance = totalDistanceMeters + distanceMeters;
+      final newUnlockedLoops = _computeUnlockedLoops(newTotalDistance);
+
       tx.update(docRef, {
         'points': newPoints,
         'level': computedLevel,
+        'totalDistanceMeters': newTotalDistance,
+        'unlockedLoops': newUnlockedLoops,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
@@ -192,4 +215,26 @@ class UserRepository {
     });
   }
 
+  /// Calcula los loops desbloqueados según la distancia total recorrida.
+  ///
+  /// - 0 km        → loop_70
+  /// - 2 km        → loop_80
+  /// - 5 km        → loop_90
+  /// - 10 km       → loop_100
+  /// - 20 km       → loop_110
+  List<String> _computeUnlockedLoops(double totalDistanceMeters) {
+    final km = totalDistanceMeters / 1000.0;
+    final loops = <String>[];
+
+    // base siempre
+    loops.add('loop_70');
+
+    if (km >= 2) loops.add('loop_80');
+    if (km >= 5) loops.add('loop_90');
+    if (km >= 10) loops.add('loop_100');
+    if (km >= 20) loops.add('loop_110');
+
+    // sin duplicados
+    return loops.toSet().toList();
+  }
 }

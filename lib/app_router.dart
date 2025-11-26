@@ -9,6 +9,7 @@ import 'screens/home_screen.dart';
 import 'screens/session_screen.dart';
 import 'screens/game_screen.dart';
 import 'screens/stats_screen.dart';
+import 'screens/loops_screen.dart';
 
 
 
@@ -64,6 +65,11 @@ final GoRouter appRouter = GoRouter(
       path: '/achievements',
       builder: (context, state) => const AchievementsScreen(),
     ),
+    GoRoute(
+      path: '/loops',
+      builder: (context, state) => const LoopsScreen(),
+    ),
+
 
   ],
 );

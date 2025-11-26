@@ -265,7 +265,8 @@ class HomeScreen extends StatelessWidget {
                   icon: Icons.music_note,
                   colors: [AppColors.purpleStart, AppColors.purpleEnd],
                   height: 90,
-                  onTap: () => showWipMessage("Canciones"),
+                  onTap: () => context.push('/loops'),
+
                 ),
               ),
               const SizedBox(width: 16),
