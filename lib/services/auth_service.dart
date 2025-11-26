@@ -5,6 +5,12 @@ class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
 
+  /// 🔹 Usuario actual (si hay sesión iniciada)
+  User? get currentUser => _auth.currentUser;
+
+  /// 🔹 ¿Hay alguien logueado?
+  bool get isLoggedIn => _auth.currentUser != null;
+
   /// 🔹 Inicia sesión con Google
   Future<User?> signInWithGoogle() async {
     try {
@@ -48,16 +54,14 @@ class AuthService {
     }
   }
 
-  /// 🔹 Cierra la sesión
+  /// 🔹 Cierra la sesión (Firebase + Google)
   Future<void> signOut() async {
     try {
       await _googleSignIn.signOut();
       await _auth.signOut();
+      print('[AUTH] Sesión cerrada correctamente');
     } catch (e) {
       print('Error al cerrar sesión: $e');
     }
   }
-
-  /// 🔹 Obtiene el usuario actual (si hay sesión iniciada)
-  User? get currentUser => _auth.currentUser;
 }

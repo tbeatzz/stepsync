@@ -2,11 +2,15 @@ import 'package:go_router/go_router.dart';
 import 'package:flutter/material.dart';
 
 // Screens
+import 'screens/achievements_screen.dart';
 import 'screens/splash_screen.dart';
 import 'screens/welcome_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/session_screen.dart';
 import 'screens/game_screen.dart';
+import 'screens/stats_screen.dart';
+
+
 
 // Servicios
 import 'services/step_service_fft.dart';
@@ -42,13 +46,24 @@ final GoRouter appRouter = GoRouter(
         final int initialBpm = data['initialBpm'] as int;
         final int initialSteps = data['initialSteps'] as int;
         final StepServiceFFT stepService = data['stepService'] as StepServiceFFT;
+        final String mode = data['mode'] as String; // 👈 nuevo
 
         return GameScreen(
           initialBpm: initialBpm,
           initialSteps: initialSteps,
           stepService: stepService,
+          mode: mode, // 👈 nuevo
         );
       },
     ),
+    GoRoute(
+      path: '/stats',
+      builder: (context, state) => const StatsScreen(),
+    ),
+    GoRoute(
+      path: '/achievements',
+      builder: (context, state) => const AchievementsScreen(),
+    ),
+
   ],
 );

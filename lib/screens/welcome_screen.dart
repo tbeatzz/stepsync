@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:go_router/go_router.dart';
 import '../services/auth_service.dart';
+import '../services/user_repository.dart';
 
 class WelcomeScreen extends StatelessWidget {
   const WelcomeScreen({super.key});
@@ -26,9 +27,12 @@ class WelcomeScreen extends StatelessWidget {
               ),
               const SizedBox(height: 80),
 
-              // 🔵 Botón principal "Ingresar"
+              // 🔵 Botón "Entrar como invitado"
               GestureDetector(
-                onTap: () => context.go('/login'),
+                onTap: () {
+                  print('[WELCOME] Entrar como invitado -> /home');
+                  context.go('/home');
+                },
                 child: Container(
                   height: 55,
                   width: double.infinity,
@@ -42,7 +46,7 @@ class WelcomeScreen extends StatelessWidget {
                   ),
                   alignment: Alignment.center,
                   child: Text(
-                    'Ingresar',
+                    'Entrar como invitado',
                     style: GoogleFonts.poppins(
                       fontSize: 18,
                       color: Colors.white,
@@ -53,37 +57,43 @@ class WelcomeScreen extends StatelessWidget {
               ),
               const SizedBox(height: 16),
 
-              // 🔴 Botón Google Sign-In
+              // 🔴 Botón Google Sign-In (real)
               ElevatedButton.icon(
-                onPressed: () {
-                  context.go('/home'); // bypass login solo para test
+                onPressed: () async {
+                  print('[WELCOME] Tap Google Sign-In');
+                  final authService = AuthService();
+
+                  final user = await authService.signInWithGoogle();
+
+
+                  if (user != null) {
+                    final userRepo = UserRepository();
+                    await userRepo.ensureCurrentUserProfile();
+                    context.go('/home');
+                  }
+
+                  print('[WELCOME] signInWithGoogle() -> $user');
+                  print(
+                      '[WELCOME] FirebaseAuth.currentUser -> ${authService.currentUser}');
+
+                  if (!context.mounted) {
+                    print('[WELCOME] context no mounted, no puedo navegar');
+                    return;
+                  }
+
+                  if (user != null) {
+                    print('[WELCOME] Login OK, navegando a /home ...');
+                    context.go('/home');
+                  } else {
+                    print('[WELCOME] user == null, mostrando snackbar');
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content:
+                        Text("Error al iniciar sesión con Google 😕"),
+                      ),
+                    );
+                  }
                 },
-
-                // onPressed: () async {
-                //   print('[LOGIN] Tap Google');
-                //   final authService = AuthService();
-                //   final user = await authService.signInWithGoogle();
-                //   print('[LOGIN] signInWithGoogle() -> $user');
-                //   print('[LOGIN] FirebaseAuth.currentUser -> ${authService.currentUser}');
-                //
-                //   if (!context.mounted) {
-                //     print('[LOGIN] context no mounted, no puedo navegar');
-                //     return;
-                //   }
-                //
-                //   if (user != null) {
-                //     print('[LOGIN] Navegando a /home ...');
-                //     context.go('/home');
-                //   } else {
-                //     print('[LOGIN] user == null, mostrando snackbar');
-                //     ScaffoldMessenger.of(context).showSnackBar(
-                //       const SnackBar(
-                //         content: Text("Error al iniciar sesión con Google"),
-                //       ),
-                //     );
-                //   }
-                // },
-
                 icon: Image.asset(
                   'assets/images/google_icon.png',
                   height: 22,
@@ -107,29 +117,15 @@ class WelcomeScreen extends StatelessWidget {
 
               const SizedBox(height: 24),
 
-              // 🟢 Texto inferior "No tenés una cuenta?"
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    '¿No tenés una cuenta? ',
-                    style: GoogleFonts.nunito(
-                      color: Colors.white70,
-                      fontSize: 14,
-                    ),
-                  ),
-                  GestureDetector(
-                    onTap: () => context.go('/register'),
-                    child: Text(
-                      'Regístrate',
-                      style: GoogleFonts.poppins(
-                        color: primaryGradientStart,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ),
-                ],
+              // Texto inferior explicando modos
+              Text(
+                'Podés jugar como invitado o usar tu cuenta de Google '
+                    'para guardar tu progreso más adelante.',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.nunito(
+                  color: Colors.white70,
+                  fontSize: 14,
+                ),
               ),
             ],
           ),

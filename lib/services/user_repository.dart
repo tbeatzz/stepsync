@@ -1,0 +1,195 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+import '../models/user_profile.dart';
+
+class UserRepository {
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+
+  CollectionReference<Map<String, dynamic>> get _usersCol =>
+      _db.collection('users').withConverter<Map<String, dynamic>>(
+        fromFirestore: (snap, _) => snap.data()!,
+        toFirestore: (data, _) => data,
+      );
+
+  /// Devuelve el UID actual o null si no hay sesión
+  String? get currentUid => _auth.currentUser?.uid;
+
+  /// Asegura que exista el perfil del usuario actual en /users/{uid}.
+  /// - Si ya existe → lo devuelve.
+  /// - Si no existe → lo crea con valores iniciales.
+  Future<UserProfile?> ensureCurrentUserProfile() async {
+    final user = _auth.currentUser;
+    if (user == null || user.email == null) {
+      // No hay usuario logueado, no hay perfil
+      return null;
+    }
+
+    final uid = user.uid;
+    final docRef = _usersCol.doc(uid);
+    final docSnap = await docRef.get();
+
+    if (docSnap.exists) {
+      return UserProfile.fromDoc(
+          docSnap as DocumentSnapshot<Map<String, dynamic>>);
+    }
+
+    // Crear perfil inicial
+    final profile = UserProfile.initialFromFirebaseUser(
+      uid: uid,
+      email: user.email!,
+      displayName: user.displayName,
+      photoURL: user.photoURL,
+    );
+
+    await docRef.set(profile.toMapForCreate());
+    return profile;
+  }
+
+  /// Obtiene el perfil actual (si existe). No crea nada.
+  Future<UserProfile?> getCurrentUserProfile() async {
+    final uid = currentUid;
+    if (uid == null) return null;
+
+    final docSnap =
+    await _usersCol.doc(uid).get() as DocumentSnapshot<Map<String, dynamic>>;
+
+    if (!docSnap.exists) return null;
+    return UserProfile.fromDoc(docSnap);
+  }
+
+  /// Stream en tiempo real del perfil actual.
+  Stream<UserProfile?> watchCurrentUserProfile() {
+    final uid = currentUid;
+    if (uid == null) {
+      // No hay usuario logueado → stream vacío
+      return const Stream<UserProfile?>.empty();
+    }
+
+    return _usersCol.doc(uid).snapshots().map((snap) {
+      if (!snap.exists) return null;
+      return UserProfile.fromDoc(
+          snap as DocumentSnapshot<Map<String, dynamic>>);
+    });
+  }
+
+  /// Actualiza parcialmente el perfil actual.
+  /// La idea es que este método lo usemos más adelante
+  /// para aplicar lógicas de puntos/nivel.
+  Future<void> updateCurrentUserProfile(UserProfile profile) async {
+    final uid = currentUid;
+    if (uid == null) return;
+
+    await _usersCol.doc(uid).update(profile.toMapForUpdate());
+  }
+
+  /// Helper básico para sumar puntos (sin lógica de nivel todavía).
+  Future<void> addPointsToCurrentUser(int deltaPoints) async {
+    final uid = currentUid;
+    if (uid == null) return;
+
+    final docRef = _usersCol.doc(uid);
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(docRef);
+      if (!snap.exists) return;
+
+      final data = snap.data() as Map<String, dynamic>;
+      final currentPoints = (data['points'] as int?) ?? 0;
+      final newPoints = currentPoints + deltaPoints;
+
+      tx.update(docRef, {
+        'points': newPoints,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  /// Aplica recompensas al usuario actual en base a una sesión.
+  /// Devuelve la cantidad de puntos ganados en esa sesión.
+  Future<int> applySessionRewards({
+    required String mode,      // "Caminar", "Trotar", "Correr"
+    required int steps,
+    required int maxCombo,
+    required int avgBpm,
+  }) async {
+    final uid = currentUid;
+    if (uid == null) {
+      // invitado → no hay perfil que actualizar
+      return 0;
+    }
+
+    // Si la sesión es prácticamente vacía, no sumamos nada
+    if (steps <= 0 || avgBpm <= 0) {
+      return 0;
+    }
+
+    final docRef = _usersCol.doc(uid);
+
+    return await _db.runTransaction<int>((tx) async {
+      final snap = await tx.get(docRef);
+      if (!snap.exists) {
+        // Perfil inconsistente: no debería pasar si usás ensureCurrentUserProfile en el login
+        return 0;
+      }
+
+      final data = snap.data() as Map<String, dynamic>;
+      final currentPoints = (data['points'] as int?) ?? 0;
+      final currentLevel = (data['level'] as int?) ?? 1;
+
+      // ---- Fórmula de puntos ----
+      // Puedes tunear esto a gusto, pero recuerdá:
+      // - Firestore rules limitan a +500 points por update
+      // - level solo puede subir de a 1
+      double modeMultiplier;
+      switch (mode) {
+        case 'Correr':
+          modeMultiplier = 1.4;
+          break;
+        case 'Trotar':
+          modeMultiplier = 1.2;
+          break;
+        case 'Caminar':
+        default:
+          modeMultiplier = 1.0;
+          break;
+      }
+
+      final baseFromSteps = steps / 20.0;        // 1 punto cada ~20 pasos
+      final comboBonus = maxCombo * 1.5;         // combo aporta bastante
+      final intensityBonus = (avgBpm - 80) / 10; // premio leve por intensidad
+
+      double raw = (baseFromSteps + comboBonus + intensityBonus) * modeMultiplier;
+
+      int reward = raw.round();
+      if (reward < 0) reward = 0;
+      if (reward > 500) reward = 500; // 🛡️ respetar reglas: delta points <= 500
+
+      final newPoints = currentPoints + reward;
+
+      // ---- Lógica de nivel ----
+      // Nivel base: 1
+      // Subimos nivel cada 1000 puntos → con máximo +500 por sesión, nunca se salta más de 1 nivel
+      const int levelStep = 1000;
+      int computedLevel = 1 + (newPoints ~/ levelStep);
+
+      // Defensa extra para respetar regla: level solo puede aumentar de a 1
+      if (computedLevel > currentLevel + 1) {
+        computedLevel = currentLevel + 1;
+      }
+      if (computedLevel < currentLevel) {
+        computedLevel = currentLevel;
+      }
+
+      tx.update(docRef, {
+        'points': newPoints,
+        'level': computedLevel,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      return reward;
+    });
+  }
+
+}

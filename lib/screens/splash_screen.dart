@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import '../services/auth_service.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -23,9 +24,19 @@ class _SplashScreenState extends State<SplashScreen>
     _opacity = Tween<double>(begin: 0.0, end: 1.0).animate(_controller);
     _controller.forward();
 
-    // Redirige al welcome después de 2 segundos
+    // Redirige según estado de sesión después de 2 segundos
     Future.delayed(const Duration(seconds: 2), () {
-      context.go('/welcome');
+      if (!mounted) return;
+
+      final authService = AuthService();
+
+      if (authService.isLoggedIn) {
+        print('[SPLASH] Usuario logueado, yendo a /home');
+        context.go('/home');
+      } else {
+        print('[SPLASH] Sin sesión, yendo a /welcome');
+        context.go('/welcome');
+      }
     });
   }
 
