@@ -62,6 +62,10 @@ flutter:
     - assets/audio/loop_90.wav
     - assets/audio/loop_100.wav
     - assets/audio/loop_110.wav
+    - assets/audio/loop_80_rap.wav
+    - assets/audio/loop_90_rap.wav
+    - assets/audio/loop_100_rap.wav
+    - assets/audio/loop_110_rap.wav
 
 
   fonts:

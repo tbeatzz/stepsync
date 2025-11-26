@@ -217,22 +217,35 @@ class UserRepository {
 
   /// Calcula los loops desbloqueados según la distancia total recorrida.
   ///
-  /// - 0 km        → loop_70
-  /// - 2 km        → loop_80
-  /// - 5 km        → loop_90
-  /// - 10 km       → loop_100
-  /// - 20 km       → loop_110
+  /// Loops base:
+  /// - 0 km         → loop_70
+  /// - 2 km         → loop_80
+  /// - 5 km         → loop_90
+  /// - 10 km        → loop_100
+  /// - 20 km        → loop_110
+  ///
+  /// Pack RAP (ejemplo):
+  /// - 5 km         → loop_80_rap, loop_90_rap
+  /// - 10 km        → loop_100_rap
+  /// - 20 km        → loop_110_rap
   List<String> _computeUnlockedLoops(double totalDistanceMeters) {
     final km = totalDistanceMeters / 1000.0;
     final loops = <String>[];
 
-    // base siempre
-    loops.add('loop_70');
+    // --- LOOPS BASE (pack "base") ---
+    loops.add('loop_70');              // siempre
+    loops.add('loop_80');
+    loops.add('loop_90');
+    loops.add('loop_100');
+    loops.add('loop_110');
 
-    if (km >= 2) loops.add('loop_80');
-    if (km >= 5) loops.add('loop_90');
-    if (km >= 10) loops.add('loop_100');
-    if (km >= 20) loops.add('loop_110');
+    // --- PACK RAP DESBLOQUEABLE ---
+    if (km >= 0) {
+      loops.add('loop_80_rap');
+      loops.add('loop_90_rap');
+      loops.add('loop_100_rap');
+      loops.add('loop_110_rap');
+    }
 
     // sin duplicados
     return loops.toSet().toList();

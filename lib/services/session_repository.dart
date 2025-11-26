@@ -72,7 +72,7 @@ class SessionRepository {
         steps: steps,
         maxCombo: maxCombo,
         avgBpm: avgBpm,
-        distanceMeters: distanceMeters, 
+        distanceMeters: distanceMeters,
       );
 
       // Debug opcional

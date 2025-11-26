@@ -297,6 +297,15 @@ class HomeScreen extends StatelessWidget {
             height: 90,
             onTap: () => showWipMessage("Perfil"),
           ),
+          // GradientButton(
+          //   label: "Modo libre",
+          //   icon: Icons.directions_walk,
+          //   colors: [AppColors.purpleStart, AppColors.purpleEnd],
+          //   height: 90,
+          //   // onTap: () => context.push('/free'),
+          //   onTap: () => showWipMessage("Modo libre"),
+          // ),
+
         ],
       ),
     );

@@ -6,6 +6,8 @@ import '../services/step_service_fft.dart';
 import '../services/audio_loop_service.dart';
 
 import '../services/session_repository.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 
 class GameScreen extends StatefulWidget {
@@ -59,6 +61,48 @@ class _GameScreenState extends State<GameScreen> {
   // 🔹 Nuevo: acumuladores para BPM promedio
   int _bpmSum = 0;
   int _bpmSamples = 0;
+
+  Future<void> _initAudioService() async {
+    // Valores por defecto: invitado o fallo de lectura
+    String selectedPack = 'base';
+    List<String> unlockedLoops = const [];
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        final doc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .get();
+
+        final data = doc.data();
+        if (data != null) {
+          selectedPack = (data['selectedPack'] as String?) ?? 'base';
+
+          final dynamic rawLoops = data['unlockedLoops'];
+          if (rawLoops is List) {
+            unlockedLoops = rawLoops.whereType<String>().toList();
+          }
+        }
+      }
+    } catch (e) {
+      // Por ahora solo log
+      // ignore: avoid_print
+      print('[GameScreen] Error leyendo pack de loops: $e');
+    }
+
+    if (_disposedOrExiting) return;
+
+    await _audioLoopService.init();
+    _audioLoopService.configurePack(
+      selectedPack: selectedPack,
+      unlockedLoops: unlockedLoops,
+    );
+
+    // Arrancamos loop con el BPM inicial estable
+    _audioLoopService.updateLoopForBpm(_stableBpm);
+  }
+
 
   // --------------- RANGOS POR MODO ---------------
 
@@ -125,6 +169,8 @@ class _GameScreenState extends State<GameScreen> {
     return (clamped - globalMin) / (globalMax - globalMin);
   }
 
+
+
   @override
   void initState() {
     super.initState();
@@ -141,9 +187,8 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     _audioLoopService = AudioLoopService();
-    _audioLoopService.init().then((_) {
-      _audioLoopService.updateLoopForBpm(_stableBpm);
-    });
+    _initAudioService();
+
 
     _recalcRhythmAndCombo();
 
