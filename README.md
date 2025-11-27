@@ -121,13 +121,19 @@ flutter run
 
 ## 🚧 Roadmap
 - [x] Login con Google  
-- [x] Detección de pasos simulada  
+- [x] Detección de pasos simulada (modo debug / pruebas)  
 - [x] Lectura real del acelerómetro  
-- [x] Sincronización de música con BPM
-- [ ] Perfil de jugador
-- [ ] Logros y progreso en la nube  
-- [ ] Modo desafío multijugador
-- [ ] Modo libre 
+- [x] Cálculo de BPM a partir de pasos (StepServiceFFT)  
+- [x] Sincronización de música con BPM (AudioLoopService)  
+
+- [x] Selección de pack de música (pack base + pack Rap desbloqueable)  
+- [ ] Perfil de jugador (nivel, puntos, distancia total, loops desbloqueados, pack elegido)  
+- [x] Logros y progreso en la nube (primera sesión + estructura para más logros)  
+
+- [ ] Modo desafío multijugador  
+- [ ] Modo libre (elegir música propia / streaming, solo contar pasos/distancia)  
+- [ ] Gestor de contenido para logros y packs (definir packs y desafíos desde Firestore sin actualizar la app)
+
 
 ---
 
