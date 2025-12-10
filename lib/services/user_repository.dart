@@ -2,6 +2,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import '../models/user_profile.dart';
+import '../services/unlock_service.dart';
+import '../services/cache_service.dart';
 
 class UserRepository {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
@@ -19,20 +21,17 @@ class UserRepository {
   /// Asegura que exista el perfil del usuario actual en /users/{uid}.
   /// - Si ya existe → lo devuelve.
   /// - Si no existe → lo crea con valores iniciales.
+  /// Además: inicializa campos para unlocks y corre un sync inicial (best-effort).
   Future<UserProfile?> ensureCurrentUserProfile() async {
     final user = _auth.currentUser;
-    if (user == null || user.email == null) {
-      // No hay usuario logueado, no hay perfil
-      return null;
-    }
+    if (user == null || user.email == null) return null;
 
     final uid = user.uid;
     final docRef = _usersCol.doc(uid);
     final docSnap = await docRef.get();
 
     if (docSnap.exists) {
-      return UserProfile.fromDoc(
-          docSnap as DocumentSnapshot<Map<String, dynamic>>);
+      return UserProfile.fromDoc(docSnap as DocumentSnapshot<Map<String, dynamic>>);
     }
 
     // Crear perfil inicial
@@ -44,6 +43,23 @@ class UserRepository {
     );
 
     await docRef.set(profile.toMapForCreate());
+
+    // Campos base para el sistema de contenido/unlocks
+    await docRef.set({
+      'selectedPack': 'base',
+      'totalDistanceMeters': 0.0,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    // Sync inicial de unlocks (packs/loops) desde Firestore (best-effort)
+    try {
+      final unlock = UnlockService(_db, cache: CacheService());
+      await unlock.syncForUser(uid: uid, totalDistanceMeters: 0.0);
+    } catch (e) {
+      // ignore: avoid_print
+      print('[UserRepository] Unlock initial sync error: $e');
+    }
+
     return profile;
   }
 
@@ -62,15 +78,11 @@ class UserRepository {
   /// Stream en tiempo real del perfil actual.
   Stream<UserProfile?> watchCurrentUserProfile() {
     final uid = currentUid;
-    if (uid == null) {
-      // No hay usuario logueado → stream vacío
-      return const Stream<UserProfile?>.empty();
-    }
+    if (uid == null) return const Stream<UserProfile?>.empty();
 
     return _usersCol.doc(uid).snapshots().map((snap) {
       if (!snap.exists) return null;
-      return UserProfile.fromDoc(
-          snap as DocumentSnapshot<Map<String, dynamic>>);
+      return UserProfile.fromDoc(snap as DocumentSnapshot<Map<String, dynamic>>);
     });
   }
 
@@ -82,7 +94,7 @@ class UserRepository {
     await _usersCol.doc(uid).update(profile.toMapForUpdate());
   }
 
-  /// Helper básico para sumar puntos (sin lógica de nivel todavía).
+  /// Helper básico para sumar puntos (sin lógica de nivel).
   Future<void> addPointsToCurrentUser(int deltaPoints) async {
     final uid = currentUid;
     if (uid == null) return;
@@ -95,7 +107,10 @@ class UserRepository {
 
       final data = snap.data() as Map<String, dynamic>;
       final currentPoints = (data['points'] as int?) ?? 0;
-      final newPoints = currentPoints + deltaPoints;
+      var newPoints = currentPoints + deltaPoints;
+
+      // defensa simple
+      if (newPoints < 0) newPoints = 0;
 
       tx.update(docRef, {
         'points': newPoints,
@@ -104,57 +119,50 @@ class UserRepository {
     });
   }
 
+  /// Fuerza un sync de unlocks para el usuario actual (best-effort).
+  Future<void> syncUnlocksNow({double? totalDistanceMeters}) async {
+    final uid = currentUid;
+    if (uid == null) return;
+    final unlock = UnlockService(_db, cache: CacheService());
+    await unlock.syncForUser(uid: uid, totalDistanceMeters: totalDistanceMeters);
+  }
+
   /// Aplica recompensas al usuario actual en base a una sesión.
   /// Devuelve la cantidad de puntos ganados en esa sesión.
   ///
-  /// Ahora tiene en cuenta también la distancia recorrida.
+  /// Ahora:
+  /// - actualiza puntos/nivel/distancia en TX
+  /// - luego corre UnlockService (post-TX) para recalcular unlockedPacks/unlockedLoops/selectedPack
   Future<int> applySessionRewards({
-    required String mode,      // "Caminar", "Trotar", "Correr"
+    required String mode, // "Caminar", "Trotar", "Correr"
     required int steps,
     required int maxCombo,
     required int avgBpm,
-    double distanceMeters = 0, // 👈 NUEVO (lo pasamos desde SessionRepository)
+    double distanceMeters = 0,
   }) async {
     final uid = currentUid;
-    if (uid == null) {
-      // invitado → no hay perfil que actualizar
-      return 0;
-    }
+    if (uid == null) return 0;
 
-    // Si la sesión es prácticamente vacía, no sumamos nada
-    if (steps <= 0 || avgBpm <= 0) {
-      return 0;
-    }
+    // sesión vacía → no sumar nada
+    if (steps <= 0 || avgBpm <= 0) return 0;
 
     final docRef = _usersCol.doc(uid);
+    double? _postTxNewTotalDistance;
 
-    return await _db.runTransaction<int>((tx) async {
+    final reward = await _db.runTransaction<int>((tx) async {
       final snap = await tx.get(docRef);
-      if (!snap.exists) {
-        // Perfil inconsistente: no debería pasar si usás ensureCurrentUserProfile en el login
-        return 0;
-      }
+      if (!snap.exists) return 0;
 
       final data = snap.data() as Map<String, dynamic>;
 
       final currentPoints = (data['points'] as int?) ?? 0;
       final currentLevel = (data['level'] as int?) ?? 1;
 
-      // Distancia total acumulada hasta ahora
+      // Distancia total acumulada
       double totalDistanceMeters = 0;
       final rawDist = data['totalDistanceMeters'];
-      if (rawDist is int) {
-        totalDistanceMeters = rawDist.toDouble();
-      } else if (rawDist is double) {
-        totalDistanceMeters = rawDist;
-      }
-
-      // Loops desbloqueados actuales (si no hay, por defecto solo loop base)
-      List<String> unlockedLoops = ['loop_70'];
-      final rawLoops = data['unlockedLoops'];
-      if (rawLoops is List) {
-        unlockedLoops = rawLoops.map((e) => e.toString()).toSet().toList();
-      }
+      if (rawDist is int) totalDistanceMeters = rawDist.toDouble();
+      if (rawDist is double) totalDistanceMeters = rawDist;
 
       // ---- Fórmula de puntos ----
       double modeMultiplier;
@@ -171,83 +179,53 @@ class UserRepository {
           break;
       }
 
-      final baseFromSteps = steps / 20.0;        // 1 punto cada ~20 pasos
-      final comboBonus = maxCombo * 1.5;         // combo aporta bastante
-      final intensityBonus = (avgBpm - 80) / 10; // premio leve por intensidad
-
-      // 👉 NUEVO: bonus por distancia (1 punto cada ~250 m)
-      final distanceBonus = (distanceMeters / 250.0);
+      final baseFromSteps = steps / 20.0; // 1 punto cada ~20 pasos
+      final comboBonus = maxCombo * 1.5;
+      final intensityBonus = (avgBpm - 80) / 10;
+      final distanceBonus = (distanceMeters / 250.0); // 1 punto cada ~250m
 
       double raw = (baseFromSteps + comboBonus + intensityBonus + distanceBonus) *
           modeMultiplier;
 
       int reward = raw.round();
       if (reward < 0) reward = 0;
-      if (reward > 500) reward = 500; // 🛡️ respetar reglas: delta points <= 500
+      if (reward > 500) reward = 500; // 🛡️ delta points <= 500
 
       final newPoints = currentPoints + reward;
 
-      // ---- Lógica de nivel ----
+      // ---- Nivel ----
       const int levelStep = 1000; // cada 1000 puntos → +1 nivel
       int computedLevel = 1 + (newPoints ~/ levelStep);
 
-      // Defensa extra para respetar regla: level solo puede aumentar de a 1
-      if (computedLevel > currentLevel + 1) {
-        computedLevel = currentLevel + 1;
-      }
-      if (computedLevel < currentLevel) {
-        computedLevel = currentLevel;
-      }
+      // Defensa extra: level solo puede aumentar de a 1
+      if (computedLevel > currentLevel + 1) computedLevel = currentLevel + 1;
+      if (computedLevel < currentLevel) computedLevel = currentLevel;
 
-      // ---- Distancia acumulada + loops desbloqueados ----
+      // ---- Distancia acumulada ----
       final newTotalDistance = totalDistanceMeters + distanceMeters;
-      final newUnlockedLoops = _computeUnlockedLoops(newTotalDistance);
+      _postTxNewTotalDistance = newTotalDistance;
 
       tx.update(docRef, {
         'points': newPoints,
         'level': computedLevel,
         'totalDistanceMeters': newTotalDistance,
-        'unlockedLoops': newUnlockedLoops,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
       return reward;
     });
-  }
 
-  /// Calcula los loops desbloqueados según la distancia total recorrida.
-  ///
-  /// Loops base:
-  /// - 0 km         → loop_70
-  /// - 2 km         → loop_80
-  /// - 5 km         → loop_90
-  /// - 10 km        → loop_100
-  /// - 20 km        → loop_110
-  ///
-  /// Pack RAP (ejemplo):
-  /// - 5 km         → loop_80_rap, loop_90_rap
-  /// - 10 km        → loop_100_rap
-  /// - 20 km        → loop_110_rap
-  List<String> _computeUnlockedLoops(double totalDistanceMeters) {
-    final km = totalDistanceMeters / 1000.0;
-    final loops = <String>[];
-
-    // --- LOOPS BASE (pack "base") ---
-    loops.add('loop_70');              // siempre
-    loops.add('loop_80');
-    loops.add('loop_90');
-    loops.add('loop_100');
-    loops.add('loop_110');
-
-    // --- PACK RAP DESBLOQUEABLE ---
-    if (km >= 0) {
-      loops.add('loop_80_rap');
-      loops.add('loop_90_rap');
-      loops.add('loop_100_rap');
-      loops.add('loop_110_rap');
+    // Post-TX: recalcular unlocks desde /app_config/current + /packs + /packs/{id}/loops
+    try {
+      if (_postTxNewTotalDistance != null) {
+        final unlock = UnlockService(_db, cache: CacheService());
+        await unlock.syncForUser(uid: uid, totalDistanceMeters: _postTxNewTotalDistance);
+      }
+    } catch (e) {
+      // ignore: avoid_print
+      print('[UserRepository] Unlock sync error: $e');
     }
 
-    // sin duplicados
-    return loops.toSet().toList();
+    return reward;
   }
 }

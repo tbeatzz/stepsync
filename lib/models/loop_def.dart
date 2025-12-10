@@ -22,16 +22,22 @@ class LoopDef {
   });
 
   factory LoopDef.fromFirestore(String id, Map<String, dynamic> data) {
+    int asInt(dynamic v, {int fallback = 0}) {
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      return fallback;
+    }
+
     return LoopDef(
       id: id,
       title: (data['title'] ?? '') as String,
-      bpmMin: (data['bpmMin'] ?? 60) as int,
-      bpmMax: (data['bpmMax'] ?? 200) as int,
+      bpmMin: asInt(data['bpmMin'], fallback: 60),
+      bpmMax: asInt(data['bpmMax'], fallback: 200),
       url: (data['url'] ?? '') as String,
       previewUrl: (data['previewUrl'] ?? '') as String,
-      durationSec: (data['durationSec'] ?? 0) as int,
+      durationSec: asInt(data['durationSec'], fallback: 0),
       tags: ((data['tags'] as List?) ?? const []).map((e) => e.toString()).toList(),
-      active: (data['active'] ?? true) as bool,
+      active: (data['active'] is bool) ? data['active'] as bool : true,
     );
   }
 }

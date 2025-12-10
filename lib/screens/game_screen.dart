@@ -2,19 +2,27 @@ import 'package:go_router/go_router.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../services/step_service_fft.dart';
-import '../services/audio_loop_service.dart';
-
-import '../services/session_repository.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
+import '../services/step_service_fft.dart';
+import '../services/audio_loop_service.dart';
+import '../services/session_repository.dart';
+
+import '../services/content_repository.dart';
+import '../services/cache_service.dart';
+
+import '../models/app_config.dart';
+import '../config/app_flags.dart';
+import '../config/app_version.dart';
+
+import '../services/user_repository.dart';
 
 class GameScreen extends StatefulWidget {
   final int initialBpm;
   final int initialSteps;
   final StepServiceFFT stepService;
-  final String mode; // "Caminar", "Trotar" o "Correr"
+  final String mode;
 
   const GameScreen({
     super.key,
@@ -29,83 +37,273 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen> {
-
-
-  // ----- estado crudo que viene del sensor -----
   int _rawBpm = 0;
   int _steps = 0;
 
-  // ----- estado filtrado / estable -----
   int _stableBpm = 0;
 
-  // ventana de bpm recientes para filtrar ruido
-  final List<int> _bpmWindow = [];
-  static const int _bpmWinSize = 7; // ~últimos ticks (~1s aprox)
+  final UserRepository _userRepo = UserRepository();
 
-  // combo / feedback
+  final List<int> _bpmWindow = [];
+  static const int _bpmWinSize = 7;
+
   bool _inRhythm = false;
   int _syncTicks = 0;
   int _maxCombo = 0;
 
-  // ciclo de vida / navegación
   bool _navigatingOut = false;
   bool _disposedOrExiting = false;
-  bool _cleanedUp = false; // 👈 nuevo
+  bool _cleanedUp = false;
+
+  late final ContentRepository _contentRepo;
+  final CacheService _cache = CacheService();
 
   late final AudioLoopService _audioLoopService;
 
-  // 🔹 Nuevo: repo y tiempos de sesión
   final SessionRepository _sessionRepo = SessionRepository();
   late final DateTime _startTime;
 
-  // 🔹 Nuevo: acumuladores para BPM promedio
   int _bpmSum = 0;
   int _bpmSamples = 0;
 
+  // Packs que tienen soporte LOCAL (assets variantes). Si no, GameScreen fuerza base cuando remote=OFF.
+  static const Set<String> _localSupportedPacks = {'base', 'rap'};
+
+  bool _isRemoteEnabledFromCfg(AppConfig cfg) {
+    final minOk = cfg.minAppVersionCode <= AppVersion.versionCode;
+    final useRemote = cfg.flagBool('useRemoteContent', fallback: AppFlags.useRemoteContent);
+    return useRemote && minOk;
+  }
+
+  // Derivar unlockedPacks desde unlockedLoops (solo keys "loop_110_rap" -> "rap")
+  Set<String> _deriveUnlockedPacksFromLoops(List<String> unlockedLoops) {
+    final out = <String>{'base'};
+    for (final k in unlockedLoops) {
+      final parts = k.split('_');
+      // loop_110_rap => ["loop","110","rap"] (>=3)
+      if (parts.length >= 3) {
+        out.add(parts.last);
+      }
+    }
+    return out;
+  }
+
+  String _pickEffectivePack({
+    required AppConfig cfg,
+    required bool isGuest,
+    required bool remoteEnabled,
+    required String selectedPackFromProfile,
+    required Set<String> unlockedPacks,
+  }) {
+    final client = cfg.clientConfig;
+
+    // Invitado: defaultPackId si está enabled, si no base
+    if (isGuest) {
+      final def = client.defaultPackId;
+      var p = client.isPackEnabled(def) ? def : 'base';
+
+      // Si remote OFF, solo packs locales
+      if (!remoteEnabled && !_localSupportedPacks.contains(p)) p = 'base';
+      return p;
+    }
+
+    // Preferencia del perfil -> si no, default
+    String pack = selectedPackFromProfile.trim().isEmpty ? client.defaultPackId : selectedPackFromProfile.trim();
+    if (pack.isEmpty) pack = 'base';
+
+    // 1) Debe estar enabled en clientConfig (o base)
+    if (pack != 'base' && !client.isPackEnabled(pack)) {
+      pack = client.isPackEnabled(client.defaultPackId) ? client.defaultPackId : 'base';
+    }
+
+    // 2) Debe estar desbloqueado (si no es base)
+    if (pack != 'base' && !unlockedPacks.contains(pack)) {
+      pack = 'base';
+    }
+
+    // 3) Si remote OFF, solo packs locales
+    if (!remoteEnabled && !_localSupportedPacks.contains(pack)) {
+      pack = 'base';
+    }
+
+    return pack;
+  }
+
+  // ============================================================
+  // ✅ NUEVO: precarga remota RAW (sin LoopDef / sin ContentRepo)
+  // ============================================================
+  int _toInt(dynamic v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return int.tryParse(v?.toString() ?? '') ?? 0;
+  }
+
+  bool _toBool(dynamic v, {bool fallback = false}) {
+    if (v is bool) return v;
+    final s = v?.toString().toLowerCase().trim();
+    if (s == 'true') return true;
+    if (s == 'false') return false;
+    return fallback;
+  }
+
+  String _toStr(dynamic v) => (v ?? '').toString();
+
+  Future<List<RemoteLoopEntry>> _fetchRemoteLoopsRaw(String packId) async {
+    final col = FirebaseFirestore.instance
+        .collection('packs')
+        .doc(packId)
+        .collection('loops');
+
+    // solo activos (igual logueamos si trae 0)
+    final q = await col.where('active', isEqualTo: true).get();
+
+    // ignore: avoid_print
+    print('[GameScreen] RAW loops pack=$packId docs=${q.docs.length}');
+
+    final out = <RemoteLoopEntry>[];
+    for (final d in q.docs) {
+      final m = d.data();
+
+      final active = _toBool(m['active'], fallback: true);
+      final bpmMin = _toInt(m['bpmMin']);
+      final bpmMax = _toInt(m['bpmMax']);
+      final url = _toStr(m['url']); // tu campo real
+
+      if (!active) {
+        // ignore: avoid_print
+        print('[GameScreen] drop ${d.id} reason=inactive');
+        continue;
+      }
+      if (url.isEmpty) {
+        // ignore: avoid_print
+        print('[GameScreen] drop ${d.id} reason=urlEmpty keys=${m.keys.toList()}');
+        continue;
+      }
+
+      out.add(RemoteLoopEntry(
+        id: d.id,
+        bpmMin: bpmMin,
+        bpmMax: bpmMax,
+        url: url,
+      ));
+    }
+
+    out.sort((a, b) => a.bpmMin.compareTo(b.bpmMin));
+    // ignore: avoid_print
+    print('[GameScreen] RAW ok pack=$packId kept=${out.length}');
+    return out;
+  }
+
   Future<void> _initAudioService() async {
-    // Valores por defecto: invitado o fallo de lectura
+    // -------------------------
+    // 0) Perfil: selectedPack + unlockedLoops + unlockedPacks
+    // -------------------------
     String selectedPack = 'base';
-    List<String> unlockedLoops = const [];
+    List<String> unlockedLoops = const <String>[];
+    Set<String> unlockedPacks = const <String>{'base'};
+    bool isGuest = true;
 
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
-        final doc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .get();
+        isGuest = false;
 
-        final data = doc.data();
-        if (data != null) {
-          selectedPack = (data['selectedPack'] as String?) ?? 'base';
+        final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+        final data = doc.data() ?? {};
 
-          final dynamic rawLoops = data['unlockedLoops'];
-          if (rawLoops is List) {
-            unlockedLoops = rawLoops.whereType<String>().toList();
-          }
+        selectedPack = (data['selectedPack'] as String?) ?? 'base';
+
+        final rawLoops = data['unlockedLoops'];
+        if (rawLoops is List) {
+          unlockedLoops = rawLoops.map((e) => e.toString()).toList();
         }
+
+        final rawPacks = data['unlockedPacks'];
+        if (rawPacks is List) {
+          unlockedPacks = {
+            'base',
+            ...rawPacks.map((e) => e.toString()),
+          };
+        } else {
+          unlockedPacks = _deriveUnlockedPacksFromLoops(unlockedLoops);
+        }
+
+        // ignore: avoid_print
+        print('[GameScreen] isGuest=$isGuest selectedPack=$selectedPack unlockedLoops=${unlockedLoops.length} unlockedPacks=$unlockedPacks');
       }
     } catch (e) {
-      // Por ahora solo log
       // ignore: avoid_print
-      print('[GameScreen] Error leyendo pack de loops: $e');
+      print('[GameScreen] WARN perfil: $e');
+      unlockedPacks = _deriveUnlockedPacksFromLoops(unlockedLoops);
     }
 
     if (_disposedOrExiting) return;
 
+    // -------------------------
+    // 1) Config + remoteEnabled
+    // -------------------------
+    final AppConfig cfg = await _contentRepo.getAppConfigOnce();
+    final bool remoteEnabled = _isRemoteEnabledFromCfg(cfg);
+
+    // -------------------------
+    // 2) Pack Gate final
+    // -------------------------
+    final String packToPlay = _pickEffectivePack(
+      cfg: cfg,
+      isGuest: isGuest,
+      remoteEnabled: remoteEnabled,
+      selectedPackFromProfile: selectedPack,
+      unlockedPacks: unlockedPacks,
+    );
+
+    // -------------------------
+    // 3) Preload catálogo remoto (RAW) (base + packToPlay)
+    // -------------------------
+    final Map<String, List<RemoteLoopEntry>> remote = {};
+
+    if (remoteEnabled) {
+      try {
+        // base siempre como fallback
+        remote['base'] = await _fetchRemoteLoopsRaw('base');
+
+        // pack elegido si no es base
+        if (packToPlay != 'base') {
+          remote[packToPlay] = await _fetchRemoteLoopsRaw(packToPlay);
+        }
+      } catch (e) {
+        // ignore: avoid_print
+        print('[GameScreen] WARN preload RAW remoto: $e');
+      }
+    }
+
+    if (_disposedOrExiting) return;
+
+    // -------------------------
+    // 4) Configurar AudioLoopService
+    // -------------------------
     await _audioLoopService.init();
+
     _audioLoopService.configurePack(
-      selectedPack: selectedPack,
+      selectedPack: packToPlay, // 👈 pack final validado
       unlockedLoops: unlockedLoops,
     );
 
-    // Arrancamos loop con el BPM inicial estable
+    _audioLoopService.configureRemote(
+      enabled: remoteEnabled,
+      loopsByPack: remote,
+    );
+    // Warmup: baja base + pack actual a cache (5 + 5 archivos)
+    await _audioLoopService.warmupRemoteCache(
+      packId: packToPlay,
+      includeBase: true,
+    );
+
+
+    // arrancar con bpm estable actual
     _audioLoopService.updateLoopForBpm(_stableBpm);
   }
 
-
-  // --------------- RANGOS POR MODO ---------------
-
+  // -------- objetivos por modo --------
   int get _targetMin {
     switch (widget.mode) {
       case 'Caminar':
@@ -132,8 +330,7 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
-  String get _modeLower =>
-      widget.mode.toLowerCase(); // "caminar", "trotar", "correr"
+  String get _modeLower => widget.mode.toLowerCase();
 
   bool _isInTargetRange(int bpm) {
     if (bpm <= 0) return false;
@@ -141,41 +338,30 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   String get _tempoLabel {
-    if (_stableBpm <= 0) {
-      return 'Esperando ritmo...';
-    }
-
+    if (_stableBpm <= 0) return 'Esperando ritmo...';
     const margin = 5;
 
-    if (_stableBpm < _targetMin - margin) {
-      return 'Vas más lento que el objetivo de $_modeLower';
-    }
-
-    if (_stableBpm > _targetMax + margin) {
-      return 'Vas más rápido que el objetivo de $_modeLower';
-    }
+    if (_stableBpm < _targetMin - margin) return 'Vas más lento que el objetivo de $_modeLower';
+    if (_stableBpm > _targetMax + margin) return 'Vas más rápido que el objetivo de $_modeLower';
 
     return '¡Estás en ritmo para $_modeLower!';
   }
 
   double get _tempoPosition {
-    // valor normalizado para una barra 0..1
     if (_stableBpm <= 0) return 0;
-
     const globalMin = 60.0;
     const globalMax = 190.0;
-    final clamped =
-    _stableBpm.clamp(globalMin.toInt(), globalMax.toInt()).toDouble();
+    final clamped = _stableBpm.clamp(globalMin.toInt(), globalMax.toInt()).toDouble();
     return (clamped - globalMin) / (globalMax - globalMin);
   }
-
-
 
   @override
   void initState() {
     super.initState();
 
-    _startTime = DateTime.now(); // 👈 inicio de sesión
+    _contentRepo = ContentRepository(FirebaseFirestore.instance, cache: _cache);
+
+    _startTime = DateTime.now();
 
     _rawBpm = widget.initialBpm;
     _stableBpm = widget.initialBpm;
@@ -188,7 +374,6 @@ class _GameScreenState extends State<GameScreen> {
 
     _audioLoopService = AudioLoopService();
     _initAudioService();
-
 
     _recalcRhythmAndCombo();
 
@@ -214,55 +399,34 @@ class _GameScreenState extends State<GameScreen> {
     });
   }
 
-
-  // guarda un nuevo bpm en la ventana y controla tamaño
   void _pushBpmSample(int val) {
     if (val < 30 || val > 240) return;
-
     _bpmWindow.add(val);
-    if (_bpmWindow.length > _bpmWinSize) {
-      _bpmWindow.removeAt(0);
-    }
+    if (_bpmWindow.length > _bpmWinSize) _bpmWindow.removeAt(0);
   }
 
   int _computeStableBpm() {
-    if (_bpmWindow.isEmpty) {
-      return _rawBpm;
-    }
+    if (_bpmWindow.isEmpty) return _rawBpm;
 
-    final samples = List<int>.from(_bpmWindow);
-
-    samples.sort();
+    final samples = List<int>.from(_bpmWindow)..sort();
     final medianPre = samples[samples.length ~/ 2];
 
-    final cleaned = samples.where((b) {
-      final diff = (b - medianPre).abs();
-      return diff <= 20;
-    }).toList();
-
-    if (cleaned.isEmpty) {
-      return _quantizeBpm(medianPre);
-    }
+    final cleaned = samples.where((b) => (b - medianPre).abs() <= 20).toList();
+    if (cleaned.isEmpty) return _quantizeBpm(medianPre);
 
     cleaned.sort();
     final median = cleaned[cleaned.length ~/ 2];
-
     return _quantizeBpm(median);
   }
 
-  int _quantizeBpm(int bpm) {
-    final quantized = (bpm / 2).round() * 2;
-    return quantized;
-  }
+  int _quantizeBpm(int bpm) => (bpm / 2).round() * 2;
 
   void _recalcRhythmAndCombo() {
     final inside = _isInTargetRange(_stableBpm);
 
     if (inside) {
       _syncTicks++;
-      if (_syncTicks > _maxCombo) {
-        _maxCombo = _syncTicks;
-      }
+      if (_syncTicks > _maxCombo) _maxCombo = _syncTicks;
     } else {
       _syncTicks = 0;
     }
@@ -271,12 +435,10 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Future<void> _saveSessionIfNeeded() async {
-    // Evitamos guardar 2 veces o guardar algo vacío
     if (_bpmSamples == 0 && _steps == 0) return;
 
     final endTime = DateTime.now();
-    final avgBpm =
-    _bpmSamples > 0 ? (_bpmSum / _bpmSamples).round() : _stableBpm;
+    final avgBpm = _bpmSamples > 0 ? (_bpmSum / _bpmSamples).round() : _stableBpm;
 
     try {
       await _sessionRepo.saveSession(
@@ -287,13 +449,22 @@ class _GameScreenState extends State<GameScreen> {
         startedAt: _startTime,
         endedAt: endTime,
       );
-    } catch (e) {
-      // Por ahora solo log, en el futuro podríamos mostrar snackbar
+
+      final reward = await _userRepo.applySessionRewards(
+        mode: widget.mode,
+        steps: _steps,
+        maxCombo: _maxCombo,
+        avgBpm: avgBpm,
+        distanceMeters: 0, // TODO: conectar distancia real
+      );
+
       // ignore: avoid_print
-      print('[GameScreen] Error guardando sesión: $e');
+      print('[GameScreen] applySessionRewards OK reward=$reward');
+    } catch (e) {
+      // ignore: avoid_print
+      print('[GameScreen] Error guardando sesión/rewards: $e');
     }
   }
-
 
   Future<void> _finishSessionAndExit() async {
     if (_navigatingOut || !mounted) return;
@@ -301,21 +472,16 @@ class _GameScreenState extends State<GameScreen> {
     _navigatingOut = true;
     _disposedOrExiting = true;
 
-    // Guardamos sesión antes de salir
     await _saveSessionIfNeeded();
 
-    // Navegamos a Home
     if (!mounted) return;
     context.go('/home');
   }
-
-
 
   @override
   void dispose() {
     _disposedOrExiting = true;
 
-    // Limpiar servicios sólo una vez
     if (!_cleanedUp) {
       _cleanedUp = true;
       widget.stepService.disposeService();
@@ -325,7 +491,6 @@ class _GameScreenState extends State<GameScreen> {
 
     super.dispose();
   }
-
 
   @override
   Widget build(BuildContext context) {
@@ -390,66 +555,26 @@ class _GameScreenState extends State<GameScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Modo: ${widget.mode}',
-            style: GoogleFonts.nunito(
-              color: Colors.white70,
-              fontSize: 14,
-            ),
-          ),
+          Text('Modo: ${widget.mode}', style: GoogleFonts.nunito(color: Colors.white70, fontSize: 14)),
           const SizedBox(height: 4),
-          Text(
-            targetText,
-            style: GoogleFonts.nunito(
-              color: Colors.white54,
-              fontSize: 13,
-            ),
-          ),
+          Text(targetText, style: GoogleFonts.nunito(color: Colors.white54, fontSize: 13)),
           const SizedBox(height: 12),
-
-          // BPM principal
           Text(
             _stableBpm > 0 ? '$_stableBpm BPM' : '-- BPM',
-            style: GoogleFonts.poppins(
-              color: Colors.white,
-              fontSize: 44,
-              fontWeight: FontWeight.w700,
-            ),
+            style: GoogleFonts.poppins(color: Colors.white, fontSize: 44, fontWeight: FontWeight.w700),
           ),
-
           const SizedBox(height: 8),
-          Text(
-            'Pasos: $_steps',
-            style: GoogleFonts.nunito(
-              color: Colors.white60,
-              fontSize: 18,
-            ),
-          ),
-
+          Text('Pasos: $_steps', style: GoogleFonts.nunito(color: Colors.white60, fontSize: 18)),
           const SizedBox(height: 16),
-
-          // Texto de feedback de ritmo
-          Text(
-            _tempoLabel,
-            style: GoogleFonts.nunito(
-              color: Colors.white70,
-              fontSize: 14,
-            ),
-          ),
-
+          Text(_tempoLabel, style: GoogleFonts.nunito(color: Colors.white70, fontSize: 14)),
           const SizedBox(height: 12),
-
-          // Pequeña barra que muestra posición del BPM en el rango global
           ClipRRect(
             borderRadius: BorderRadius.circular(20),
             child: Container(
               height: 10,
-              decoration: BoxDecoration(
-                color: Colors.white12,
-              ),
+              decoration: const BoxDecoration(color: Colors.white12),
               child: Stack(
                 children: [
-                  // Zona objetivo
                   Positioned.fill(
                     child: LayoutBuilder(
                       builder: (context, constraints) {
@@ -457,10 +582,8 @@ class _GameScreenState extends State<GameScreen> {
                         const globalMax = 190.0;
                         final width = constraints.maxWidth;
 
-                        double start =
-                            (_targetMin - globalMin) / (globalMax - globalMin);
-                        double end =
-                            (_targetMax - globalMin) / (globalMax - globalMin);
+                        double start = (_targetMin - globalMin) / (globalMax - globalMin);
+                        double end = (_targetMax - globalMin) / (globalMax - globalMin);
 
                         start = start.clamp(0.0, 1.0);
                         end = end.clamp(0.0, 1.0);
@@ -476,12 +599,9 @@ class _GameScreenState extends State<GameScreen> {
                               top: 0,
                               bottom: 0,
                               child: Container(
-                                decoration: BoxDecoration(
-                                  gradient: const LinearGradient(
-                                    colors: [
-                                      Color(0xFF42C86D),
-                                      Color(0xFF2D978C)
-                                    ],
+                                decoration: const BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: [Color(0xFF42C86D), Color(0xFF2D978C)],
                                   ),
                                 ),
                               ),
@@ -491,13 +611,10 @@ class _GameScreenState extends State<GameScreen> {
                       },
                     ),
                   ),
-                  // Marca de BPM actual
                   Positioned.fill(
                     child: LayoutBuilder(
                       builder: (context, constraints) {
-                        final pos = _tempoPosition;
-                        final x = constraints.maxWidth * pos;
-
+                        final x = constraints.maxWidth * _tempoPosition;
                         return Align(
                           alignment: Alignment.centerLeft,
                           child: Transform.translate(
@@ -525,7 +642,7 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Widget _buildComboHint() {
-    final bool good = _inRhythm;
+    final good = _inRhythm;
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
@@ -541,10 +658,7 @@ class _GameScreenState extends State<GameScreen> {
         ),
         boxShadow: [
           BoxShadow(
-            color: (good
-                ? const Color(0xFF42C86D)
-                : const Color(0xFFFF6464))
-                .withOpacity(0.35),
+            color: (good ? const Color(0xFF42C86D) : const Color(0xFFFF6464)).withOpacity(0.35),
             blurRadius: 18,
             spreadRadius: 2,
           ),
@@ -555,21 +669,14 @@ class _GameScreenState extends State<GameScreen> {
         children: [
           Text(
             good ? '¡Combo x$_syncTicks!' : 'Fuera de ritmo',
-            style: GoogleFonts.poppins(
-              color: Colors.white,
-              fontSize: 20,
-              fontWeight: FontWeight.w600,
-            ),
+            style: GoogleFonts.poppins(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 8),
           Text(
             good
                 ? 'Mantené el ritmo de $_modeLower para subir el combo.\nMáx: x$_maxCombo'
                 : 'Volvé al rango objetivo de $_modeLower para reactivar el combo.',
-            style: GoogleFonts.nunito(
-              color: Colors.white,
-              fontSize: 16,
-            ),
+            style: GoogleFonts.nunito(color: Colors.white, fontSize: 16),
           ),
         ],
       ),
@@ -599,11 +706,7 @@ class _GameScreenState extends State<GameScreen> {
         child: Center(
           child: Text(
             'Finalizar sesión',
-            style: GoogleFonts.poppins(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-            ),
+            style: GoogleFonts.poppins(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
           ),
         ),
       ),

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:just_audio/just_audio.dart';
@@ -8,7 +10,6 @@ import '../services/audio_loop_service.dart'; // walkingBuckets (local)
 
 import '../services/content_repository.dart';
 import '../models/app_config.dart';
-import '../models/pack_def.dart';
 import '../models/loop_def.dart';
 import '../config/app_flags.dart';
 import '../config/app_version.dart';
@@ -22,13 +23,17 @@ class LoopsScreen extends StatefulWidget {
 
 class _LoopsScreenState extends State<LoopsScreen> {
   final AudioPlayer _previewPlayer = AudioPlayer();
+  StreamSubscription<User?>? _authSub;
 
-  // null = nada sonando, valor = índice activo
   int? _currentIndex;
 
-  // ---- Perfil / packs ----
-  String _selectedPack = 'base'; // "base" o "rap"
+  // Perfil
+  String _selectedPack = 'base';
   List<String> _unlockedLoops = [];
+
+  // ✅ Nuevo (más robusto)
+  Set<String> _unlockedPacks = {'base'};
+
   bool _loadingProfile = true;
   bool _isGuest = false;
 
@@ -41,27 +46,40 @@ class _LoopsScreenState extends State<LoopsScreen> {
   void initState() {
     super.initState();
     _contentRepo = ContentRepository(_db);
-    _loadProfileAndPacks();
+
+    // primera carga
+    _loadProfile();
+
+    // ✅ FIX: recargar cuando FirebaseAuth termina de restaurar sesión
+    _authSub = _auth.authStateChanges().listen((_) {
+      if (!mounted) return;
+      _loadProfile();
+    });
   }
 
   @override
   void dispose() {
+    _authSub?.cancel();
     _previewPlayer.dispose();
     super.dispose();
   }
 
   // --------------------------------------------------
-  // CARGA DE PERFIL: selectedPack + unlockedLoops
+  // PERFIL: selectedPack + unlockedLoops (+ unlockedPacks)
   // --------------------------------------------------
-  Future<void> _loadProfileAndPacks() async {
+  Future<void> _loadProfile() async {
     try {
       final user = _auth.currentUser;
 
+      // DEBUG (dejalo un rato hasta que lo confirmes)
+      // ignore: avoid_print
+      print('[LoopsScreen] currentUser=${user?.uid}');
+
       if (user == null) {
-        // Invitado → solo pack base local, sin Firestore
         setState(() {
           _isGuest = true;
           _selectedPack = 'base';
+          _unlockedPacks = {'base'};
           _unlockedLoops = <String>[
             'loop_70',
             'loop_80',
@@ -75,49 +93,57 @@ class _LoopsScreenState extends State<LoopsScreen> {
       }
 
       final doc = await _db.collection('users').doc(user.uid).get();
-
-      if (!doc.exists) {
-        setState(() {
-          _isGuest = false;
-          _selectedPack = 'base';
-          _unlockedLoops = <String>[
-            'loop_70',
-            'loop_80',
-            'loop_90',
-            'loop_100',
-            'loop_110',
-          ];
-          _loadingProfile = false;
-        });
-        return;
-      }
-
-      final data = doc.data() as Map<String, dynamic>;
+      final data = doc.data() ?? <String, dynamic>{};
 
       final selectedPack = (data['selectedPack'] as String?) ?? 'base';
-      final unlocked = (data['unlockedLoops'] as List?)
-          ?.map((e) => e.toString())
-          .toList() ??
-          <String>[
-            'loop_70',
-            'loop_80',
-            'loop_90',
-            'loop_100',
-            'loop_110',
-          ];
+
+      // unlockedLoops (siempre como string)
+      final rawUnlocked = data['unlockedLoops'];
+      final unlockedLoops = (rawUnlocked is List)
+          ? rawUnlocked.map((e) => e.toString()).toList()
+          : <String>[
+        'loop_70',
+        'loop_80',
+        'loop_90',
+        'loop_100',
+        'loop_110',
+      ];
+
+      // unlockedPacks (opcional, si existe)
+      final rawPacks = data['unlockedPacks'];
+      final unlockedPacks = <String>{'base'};
+
+      if (rawPacks is List) {
+        unlockedPacks.addAll(rawPacks.map((e) => e.toString()));
+      } else {
+        // ✅ FIX: derivarlo de unlockedLoops SOLO si tiene formato loop_XX_pack (no números)
+        final re = RegExp(r'^loop_\d+_([a-zA-Z0-9]+)$');
+        for (final k in unlockedLoops) {
+          final m = re.firstMatch(k);
+          if (m != null) {
+            unlockedPacks.add(m.group(1)!); // rock/rap/edm...
+          }
+        }
+      }
 
       setState(() {
         _isGuest = false;
-        _selectedPack = (selectedPack == 'rap') ? 'rap' : 'base';
-        _unlockedLoops = unlocked;
+        _selectedPack = selectedPack.isNotEmpty ? selectedPack : 'base';
+        _unlockedLoops = unlockedLoops;
+        _unlockedPacks = unlockedPacks;
         _loadingProfile = false;
       });
+
+      // ignore: avoid_print
+      print('[LoopsScreen] isGuest=$_isGuest selectedPack=$_selectedPack '
+          'unlockedLoops=${_unlockedLoops.length} unlockedPacks=$_unlockedPacks');
     } catch (e) {
       // ignore: avoid_print
       print('[LoopsScreen] Error cargando perfil: $e');
       setState(() {
         _isGuest = _auth.currentUser == null;
         _selectedPack = 'base';
+        _unlockedPacks = {'base'};
         _unlockedLoops = <String>[
           'loop_70',
           'loop_80',
@@ -130,25 +156,77 @@ class _LoopsScreenState extends State<LoopsScreen> {
     }
   }
 
-  bool get _rapPackUnlocked => _unlockedLoops.any((id) => id.endsWith('_rap'));
+  // --------------------------------------------------
+  // Remote enabled?
+  // --------------------------------------------------
+  bool _isRemoteEnabledFrom(AppConfig? cfg) {
+    final minOk = (cfg?.minAppVersionCode ?? 0) <= AppVersion.versionCode;
+    final useRemote = cfg?.flagBool(
+      'useRemoteContent',
+      fallback: AppFlags.useRemoteContent,
+    ) ??
+        AppFlags.useRemoteContent;
+    return useRemote && minOk;
+  }
 
   // --------------------------------------------------
-  // CAMBIO DE PACK (local y remoto usan el mismo selector por ahora)
+  // Packs desde clientConfig
   // --------------------------------------------------
-  Future<void> _onSelectPack(String pack) async {
-    if (_selectedPack == pack) return;
+  List<String> _packsFromClientConfig(AppConfig? cfg) {
+    final client = cfg?.clientConfig;
+    final ids = client?.enabledPackIdsSorted() ?? const <String>[];
 
-    if (pack == 'rap' && !_rapPackUnlocked) {
-      if (!mounted) return;
+    if (ids.isEmpty) return <String>['base', 'rap'];
+
+    if (!ids.contains('base')) return <String>['base', ...ids];
+    return ids;
+  }
+
+  String _packTitle(AppConfig? cfg, String packId) {
+    final t = cfg?.clientConfig.packs[packId]?.title;
+    if (t != null && t.trim().isNotEmpty) return t;
+    if (packId == 'base') return 'Base';
+    return packId.toUpperCase();
+  }
+
+  // ✅ Pack desbloqueado: primero por unlockedPacks, fallback por sufijo de unlockedLoops
+  bool _isPackUnlocked(String packId) {
+    if (packId == 'base') return true;
+    if (_unlockedPacks.contains(packId)) return true;
+    return _unlockedLoops.any((k) => k.endsWith('_$packId'));
+  }
+
+  // --------------------------------------------------
+  // Cambiar pack
+  // --------------------------------------------------
+  Future<void> _onSelectPack(AppConfig cfg, String packId, {required bool remoteEnabled}) async {
+    if (!remoteEnabled && packId != 'base' && packId != 'rap') {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pack Rap aún no desbloqueado 💿')),
+        const SnackBar(content: Text('Este pack requiere Remote Content activado.')),
       );
       return;
     }
 
+    if (_isGuest && packId != 'base') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Iniciá sesión para desbloquear packs 🔒')),
+      );
+      return;
+    }
+
+    if (packId != 'base' && !_isPackUnlocked(packId)) {
+      final title = _packTitle(cfg, packId);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Pack $title aún no desbloqueado 🔒')),
+      );
+      return;
+    }
+
+    if (_selectedPack == packId) return;
+
     setState(() {
-      _selectedPack = pack;
-      _currentIndex = null; // corta “selección” en UI
+      _selectedPack = packId;
+      _currentIndex = null;
     });
     await _previewPlayer.stop();
 
@@ -159,7 +237,7 @@ class _LoopsScreenState extends State<LoopsScreen> {
 
     try {
       await _db.collection('users').doc(user.uid).update({
-        'selectedPack': pack,
+        'selectedPack': packId,
         'updatedAt': FieldValue.serverTimestamp(),
       });
     } catch (e) {
@@ -169,7 +247,7 @@ class _LoopsScreenState extends State<LoopsScreen> {
   }
 
   // --------------------------------------------------
-  // PREVIEW LOCAL (assets)
+  // Preview LOCAL (assets)
   // --------------------------------------------------
   Future<void> _togglePlayLocal(int index, String assetPathBase) async {
     if (_currentIndex == index) {
@@ -179,11 +257,11 @@ class _LoopsScreenState extends State<LoopsScreen> {
       return;
     }
 
-    final loopIdBase = _loopIdFromAsset(assetPathBase); // "loop_80"
+    final baseLoopId = _loopIdFromAsset(assetPathBase);
     String assetToPlay = assetPathBase;
 
-    if (_selectedPack == 'rap' && _rapPackUnlocked) {
-      final rapId = '${loopIdBase}_rap';
+    if (_selectedPack == 'rap') {
+      final rapId = '${baseLoopId}_rap';
       if (_unlockedLoops.contains(rapId)) {
         assetToPlay = 'assets/audio/$rapId.wav';
       }
@@ -199,13 +277,13 @@ class _LoopsScreenState extends State<LoopsScreen> {
   }
 
   // --------------------------------------------------
-  // PREVIEW REMOTO (url o assets)
+  // Preview REMOTO (url / previewUrl)
   // --------------------------------------------------
   Future<void> _togglePlayRemote({
     required int index,
     required LoopDef loop,
-    required String displayKey,
     required bool locked,
+    required String fallbackAssetKey,
   }) async {
     if (locked) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -226,13 +304,12 @@ class _LoopsScreenState extends State<LoopsScreen> {
     final url = loop.previewUrl.isNotEmpty ? loop.previewUrl : loop.url;
 
     try {
-      if (url.startsWith('assets/')) {
-        await _previewPlayer.setAsset(url);
-      } else if (url.startsWith('http')) {
+      if (url.startsWith('http')) {
         await _previewPlayer.setUrl(url);
+      } else if (url.startsWith('assets/')) {
+        await _previewPlayer.setAsset(url);
       } else {
-        // fallback: si todavía no hay URLs, intentamos mapear a assets por key
-        await _previewPlayer.setAsset('assets/audio/$displayKey.wav');
+        await _previewPlayer.setAsset('assets/audio/$fallbackAssetKey.wav');
       }
 
       await _previewPlayer.setLoopMode(LoopMode.one);
@@ -251,65 +328,52 @@ class _LoopsScreenState extends State<LoopsScreen> {
     }
   }
 
-  // "assets/audio/loop_80.wav" -> "loop_80"
   String _loopIdFromAsset(String asset) {
     final name = asset.split('/').last;
-    final withoutExt = name.split('.').first;
-    return withoutExt;
+    return name.split('.').first;
   }
 
-  // Para remoto: clave de desbloqueo por pack (base = loopId, rap = loopId_rap)
-  String _unlockKeyFor(String baseLoopId, String packId) {
-    if (packId == 'base') return baseLoopId;
-    return '${baseLoopId}_$packId';
+  String _baseLoopIdForPack(String loopId, String packId) {
+    final suffix = '_$packId';
+    if (loopId.endsWith(suffix)) {
+      return loopId.substring(0, loopId.length - suffix.length);
+    }
+    return loopId;
   }
 
-  bool _isRemoteEnabledFrom(AppConfig? cfg) {
-    final minOk = (cfg?.minAppVersionCode ?? 0) <= AppVersion.versionCode;
-    final useRemote = cfg?.flagBool(
-      'useRemoteContent',
-      fallback: AppFlags.useRemoteContent,
-    ) ??
-        AppFlags.useRemoteContent;
-    return useRemote && minOk;
-  }
-
+  // --------------------------------------------------
+  // BUILD
+  // --------------------------------------------------
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<AppConfig>(
       stream: _contentRepo.watchAppConfig(),
       builder: (context, snapCfg) {
-        final remoteEnabled = _isRemoteEnabledFrom(snapCfg.data);
+        final cfg = snapCfg.data;
+        final remoteEnabled = _isRemoteEnabledFrom(cfg);
 
         return Scaffold(
           backgroundColor: const Color(0xFF0D0C14),
           appBar: AppBar(
             title: Text(
               remoteEnabled ? 'Loops de StepSync (Remote)' : 'Loops de StepSync',
-              style: GoogleFonts.poppins(
-                color: Colors.white,
-                fontWeight: FontWeight.w600,
-              ),
+              style: GoogleFonts.poppins(color: Colors.white, fontWeight: FontWeight.w600),
             ),
             backgroundColor: Colors.transparent,
             elevation: 0,
             iconTheme: const IconThemeData(color: Colors.white),
           ),
           body: _loadingProfile
-              ? const Center(
-            child: CircularProgressIndicator(color: Colors.greenAccent),
-          )
+              ? const Center(child: CircularProgressIndicator(color: Colors.greenAccent))
               : Padding(
             padding: const EdgeInsets.all(20),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _buildPackSelector(),
+                _buildPackSelector(cfg, remoteEnabled: remoteEnabled),
                 const SizedBox(height: 20),
                 Expanded(
-                  child: remoteEnabled
-                      ? _buildRemoteLoopsList()
-                      : _buildLocalLoopsList(),
+                  child: remoteEnabled ? _buildRemoteLoopsList(cfg) : _buildLocalLoopsList(cfg),
                 ),
               ],
             ),
@@ -320,179 +384,48 @@ class _LoopsScreenState extends State<LoopsScreen> {
   }
 
   // --------------------------------------------------
-  // LOCAL LIST (tu lógica actual)
+  // PACK SELECTOR
   // --------------------------------------------------
-  Widget _buildLocalLoopsList() {
-    final buckets = walkingBuckets;
-
-    return ListView.separated(
-      itemCount: buckets.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 14),
-      itemBuilder: (context, index) {
-        final bucket = buckets[index];
-        final bpmLabel = _bpmLabelFromAsset(bucket.asset, bucket.min, bucket.max);
-        final isPlaying = _currentIndex == index;
-
-        return _buildLoopTile(
-          index: index,
-          bpmLabel: bpmLabel,
-          bucketMin: bucket.min,
-          bucketMax: bucket.max,
-          isPlaying: isPlaying,
-          // info UI
-          displayId: _displayIdForLocal(bucket.asset),
-          currentPackLabel: _selectedPack == 'rap' && _rapPackUnlocked ? 'Pack Rap' : 'Pack Base',
-          locked: _isLocalLocked(bucket.asset),
-          // action
-          onPlayPause: () => _togglePlayLocal(index, bucket.asset),
-        );
-      },
-    );
-  }
-
-  String _displayIdForLocal(String assetPathBase) {
-    final loopId = _loopIdFromAsset(assetPathBase);
-    if (_selectedPack == 'rap' && _rapPackUnlocked) return '${loopId}_rap';
-    return loopId;
-  }
-
-  bool _isLocalLocked(String assetPathBase) {
-    if (_selectedPack != 'rap') return false;
-    if (!_rapPackUnlocked) return true;
-    final loopId = _loopIdFromAsset(assetPathBase);
-    final rapId = '${loopId}_rap';
-    return !_unlockedLoops.contains(rapId);
-  }
-
-  // --------------------------------------------------
-  // REMOTE LIST (desde Firestore packs/{packId}/loops)
-  // --------------------------------------------------
-  Widget _buildRemoteLoopsList() {
-    // Invitado: forzamos base
-    final packId = _isGuest ? 'base' : _selectedPack;
-
-    return StreamBuilder<List<PackDef>>(
-      stream: _contentRepo.watchPacks(),
-      builder: (context, snapPacks) {
-        if (snapPacks.hasError) {
-          return Center(child: Text('Error packs: ${snapPacks.error}', style: const TextStyle(color: Colors.white70)));
-        }
-
-        final packs = (snapPacks.data ?? const <PackDef>[])
-            .where((p) => p.active)
-            .toList();
-
-        if (packs.isEmpty) {
-          return const Center(
-            child: Text('No hay packs remotos activos.', style: TextStyle(color: Colors.white70)),
-          );
-        }
-
-        // Si el packId seleccionado no existe en remoto, caemos al primero activo
-        final effectivePackId = packs.any((p) => p.id == packId) ? packId : packs.first.id;
-
-        return StreamBuilder<List<LoopDef>>(
-          stream: _contentRepo.watchLoops(effectivePackId),
-          builder: (context, snapLoops) {
-            if (snapLoops.hasError) {
-              return Center(child: Text('Error loops: ${snapLoops.error}', style: const TextStyle(color: Colors.white70)));
-            }
-
-            final loops = (snapLoops.data ?? const <LoopDef>[])
-                .where((l) => l.active)
-                .toList();
-
-            if (loops.isEmpty) {
-              return const Center(
-                child: Text('Este pack no tiene loops activos.', style: TextStyle(color: Colors.white70)),
-              );
-            }
-
-            return ListView.separated(
-              itemCount: loops.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 14),
-              itemBuilder: (context, index) {
-                final loop = loops[index];
-                final isPlaying = _currentIndex == index;
-
-                // displayKey: si pack != base -> loopId_pack
-                final displayKey = (effectivePackId == 'base')
-                    ? loop.id
-                    : '${loop.id}_$effectivePackId';
-
-                final locked = effectivePackId == 'base'
-                    ? false
-                    : !_unlockedLoops.contains(_unlockKeyFor(loop.id, effectivePackId));
-
-                final bpmLabel = '${loop.bpmMin}–${loop.bpmMax} BPM';
-                final currentPackLabel = effectivePackId == 'base' ? 'Pack Base' : 'Pack ${effectivePackId.toUpperCase()}';
-
-                return _buildLoopTile(
-                  index: index,
-                  bpmLabel: bpmLabel,
-                  bucketMin: loop.bpmMin,
-                  bucketMax: loop.bpmMax,
-                  isPlaying: isPlaying,
-                  displayId: displayKey,
-                  currentPackLabel: currentPackLabel,
-                  locked: locked,
-                  onPlayPause: () => _togglePlayRemote(
-                    index: index,
-                    loop: loop,
-                    displayKey: displayKey,
-                    locked: locked,
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
-  // --------------------------------------------------
-  // UI: Selector de Pack (Base / Rap)
-  // --------------------------------------------------
-  Widget _buildPackSelector() {
-    final rapUnlocked = _rapPackUnlocked;
+  Widget _buildPackSelector(AppConfig? cfg, {required bool remoteEnabled}) {
+    final packs = _packsFromClientConfig(cfg);
+    final shown = remoteEnabled ? packs : packs.where((p) => p == 'base' || p == 'rap').toList();
+    final packIds = shown.isNotEmpty ? shown : <String>['base', 'rap'];
 
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
       decoration: BoxDecoration(
         color: const Color(0xFF15151E),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: Colors.white12),
       ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _buildPackChip(
-              label: 'Base',
-              subtitle: 'Loops estándar',
-              selected: _selectedPack == 'base',
-              onTap: () => _onSelectPack('base'),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: _buildPackChip(
-              label: 'Rap',
-              subtitle: rapUnlocked ? 'Loops Rap desbloqueados' : 'Desbloqueá caminando',
-              selected: _selectedPack == 'rap',
-              locked: !rapUnlocked,
-              onTap: rapUnlocked
-                  ? () => _onSelectPack('rap')
-                  : () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Caminá al menos 5 km para desbloquear el pack Rap 💿'),
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (final packId in packIds) ...[
+              _buildPackChip(
+                label: _packTitle(cfg, packId),
+                subtitle: packId == 'base' ? 'Loops estándar' : 'Pack $packId',
+                selected: _selectedPack == packId,
+                locked: (_isGuest && packId != 'base') || (packId != 'base' && !_isPackUnlocked(packId)),
+                onTap: () {
+                  final safeCfg = cfg ??
+                      const AppConfig(
+                        contentVersion: 0,
+                        minAppVersionCode: 0,
+                        flags: <String, dynamic>{},
+                        clientConfig: ClientConfig(
+                          defaultPackId: 'base',
+                          packs: <String, ClientPackCfg>{},
+                        ),
+                      );
+                  _onSelectPack(safeCfg, packId, remoteEnabled: remoteEnabled);
+                },
+              ),
+              const SizedBox(width: 10),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -504,13 +437,12 @@ class _LoopsScreenState extends State<LoopsScreen> {
     required VoidCallback onTap,
     bool locked = false,
   }) {
-    final Color baseColor = locked
-        ? Colors.grey
-        : (selected ? const Color(0xFF42C86D) : Colors.white70);
+    final Color baseColor = locked ? Colors.grey : (selected ? const Color(0xFF42C86D) : Colors.white70);
 
     return GestureDetector(
       onTap: onTap,
       child: Container(
+        width: 160,
         padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(16),
@@ -534,19 +466,16 @@ class _LoopsScreenState extends State<LoopsScreen> {
                 children: [
                   Text(
                     label,
-                    style: GoogleFonts.poppins(
-                      color: baseColor,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.poppins(color: baseColor, fontSize: 14, fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 2),
                   Text(
                     subtitle,
-                    style: GoogleFonts.nunito(
-                      color: Colors.white54,
-                      fontSize: 11,
-                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.nunito(color: Colors.white54, fontSize: 11),
                   ),
                 ],
               ),
@@ -554,6 +483,158 @@ class _LoopsScreenState extends State<LoopsScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  // --------------------------------------------------
+  // LOCAL LIST
+  // --------------------------------------------------
+  Widget _buildLocalLoopsList(AppConfig? cfg) {
+    final effectivePack = (_selectedPack == 'rap') ? 'rap' : 'base';
+    final bool showFallbackBanner = _selectedPack != effectivePack;
+    final buckets = walkingBuckets;
+
+    return Column(
+      children: [
+        if (showFallbackBanner)
+          Container(
+            padding: const EdgeInsets.all(12),
+            margin: const EdgeInsets.only(bottom: 12),
+            decoration: BoxDecoration(
+              color: Colors.white10,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: Text(
+              'Remote Content está desactivado. Mostrando pack Base.',
+              style: GoogleFonts.nunito(color: Colors.white70),
+            ),
+          ),
+        Expanded(
+          child: ListView.separated(
+            itemCount: buckets.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 14),
+            itemBuilder: (context, index) {
+              final bucket = buckets[index];
+              final bpmLabel = _bpmLabelFromAsset(bucket.asset, bucket.min, bucket.max);
+              final isPlaying = _currentIndex == index;
+
+              final baseLoopId = _loopIdFromAsset(bucket.asset);
+              final displayId = effectivePack == 'rap' ? '${baseLoopId}_rap' : baseLoopId;
+
+              final locked = effectivePack == 'rap' && !_unlockedLoops.contains('${baseLoopId}_rap');
+
+              return _buildLoopTile(
+                index: index,
+                bpmLabel: bpmLabel,
+                bucketMin: bucket.min,
+                bucketMax: bucket.max,
+                isPlaying: isPlaying,
+                displayId: displayId,
+                currentPackLabel: effectivePack == 'rap' ? 'Pack RAP (Local)' : 'Pack BASE (Local)',
+                locked: locked,
+                onPlayPause: () => _togglePlayLocal(index, bucket.asset),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  // --------------------------------------------------
+  // REMOTE LIST
+  // --------------------------------------------------
+  Widget _buildRemoteLoopsList(AppConfig? cfg) {
+    final safeCfg = cfg ??
+        const AppConfig(
+          contentVersion: 0,
+          minAppVersionCode: 0,
+          flags: <String, dynamic>{},
+          clientConfig: ClientConfig(
+            defaultPackId: 'base',
+            packs: <String, ClientPackCfg>{},
+          ),
+        );
+
+    final client = safeCfg.clientConfig;
+
+    // ✅ Guest consistente con GameScreen: siempre base
+    String packId = _isGuest ? 'base' : _selectedPack;
+
+    if (!client.isPackEnabled(packId)) {
+      packId = client.isPackEnabled(client.defaultPackId) ? client.defaultPackId : 'base';
+    }
+
+    final currentPackLabel = 'Pack ${_packTitle(safeCfg, packId)} (Remote)';
+
+    // ✅ lock por PACK (no por loop)
+    final packLocked = (packId != 'base') && !_isPackUnlocked(packId);
+
+    if (packLocked) {
+      return Center(
+        child: Text(
+          'Este pack está bloqueado 🔒\nJugá para desbloquearlo.',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.nunito(color: Colors.white70, fontSize: 16),
+        ),
+      );
+    }
+
+    return StreamBuilder<List<LoopDef>>(
+      stream: _contentRepo.watchLoops(packId),
+      builder: (context, snapLoops) {
+        if (snapLoops.hasError) {
+          return Center(
+            child: Text('Error loops: ${snapLoops.error}', style: const TextStyle(color: Colors.white70)),
+          );
+        }
+
+        final loops = (snapLoops.data ?? const <LoopDef>[])
+            .where((l) => l.active)
+            .toList()
+          ..sort((a, b) => a.bpmMin.compareTo(b.bpmMin));
+
+        if (loops.isEmpty) {
+          return const Center(
+            child: Text('Este pack no tiene loops activos.', style: TextStyle(color: Colors.white70)),
+          );
+        }
+
+        return ListView.separated(
+          itemCount: loops.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 14),
+          itemBuilder: (context, index) {
+            final loop = loops[index];
+            final isPlaying = _currentIndex == index;
+
+            final baseLoopId = _baseLoopIdForPack(loop.id, packId);
+            final displayId = (packId == 'base') ? baseLoopId : '${baseLoopId}_$packId';
+
+            // ✅ pack unlocked => no lockeamos por loopKey
+            final locked = false;
+
+            final bpmLabel = '${loop.bpmMin}–${loop.bpmMax} BPM';
+
+            return _buildLoopTile(
+              index: index,
+              bpmLabel: bpmLabel,
+              bucketMin: loop.bpmMin,
+              bucketMax: loop.bpmMax,
+              isPlaying: isPlaying,
+              displayId: displayId,
+              currentPackLabel: currentPackLabel,
+              locked: locked,
+              onPlayPause: () => _togglePlayRemote(
+                index: index,
+                loop: loop,
+                locked: locked,
+                fallbackAssetKey: displayId,
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
@@ -619,9 +700,7 @@ class _LoopsScreenState extends State<LoopsScreen> {
                   ),
                 ),
                 child: Icon(
-                  locked
-                      ? Icons.lock
-                      : (isPlaying ? Icons.pause : Icons.play_arrow),
+                  locked ? Icons.lock : (isPlaying ? Icons.pause : Icons.play_arrow),
                   color: Colors.white,
                 ),
               ),
@@ -633,27 +712,17 @@ class _LoopsScreenState extends State<LoopsScreen> {
                 children: [
                   Text(
                     bpmLabel,
-                    style: GoogleFonts.poppins(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
+                    style: GoogleFonts.poppins(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 2),
                   Text(
                     modeHint,
-                    style: GoogleFonts.nunito(
-                      color: Colors.white60,
-                      fontSize: 13,
-                    ),
+                    style: GoogleFonts.nunito(color: Colors.white60, fontSize: 13),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     '$displayId  ·  $currentPackLabel',
-                    style: GoogleFonts.nunito(
-                      color: Colors.white30,
-                      fontSize: 11,
-                    ),
+                    style: GoogleFonts.nunito(color: Colors.white30, fontSize: 11),
                   ),
                 ],
               ),
@@ -670,4 +739,23 @@ class _LoopsScreenState extends State<LoopsScreen> {
     if (mid < 120) return 'Buen ritmo para trotar';
     return 'Perfecto para correr intenso';
   }
+
+
 }
+// ---- LoopsScreen local buckets (export) ----
+class BpmBucket {
+  final int min;
+  final int max;
+  final String asset;
+  const BpmBucket({required this.min, required this.max, required this.asset});
+
+  bool contains(int bpm) => bpm >= min && bpm <= max;
+}
+
+const List<BpmBucket> walkingBuckets = <BpmBucket>[
+  BpmBucket(min: 10,  max: 75,  asset: 'assets/audio/loop_70.wav'),
+  BpmBucket(min: 76,  max: 85,  asset: 'assets/audio/loop_80.wav'),
+  BpmBucket(min: 86,  max: 95,  asset: 'assets/audio/loop_90.wav'),
+  BpmBucket(min: 96,  max: 105, asset: 'assets/audio/loop_100.wav'),
+  BpmBucket(min: 106, max: 200, asset: 'assets/audio/loop_110.wav'),
+];
